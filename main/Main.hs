@@ -24,7 +24,6 @@ newtype GreeterState = GreeterState {
 main :: IO ()
 main = do
   putStrLn "http://localhost:8000/"
-  -- middleware <- mkRequestLogger (def { outputFormat = Detailed True })
   run 8000 (logStdout $ createServantApp initialCtx functionTable)
   where
     initialCtx = GreeterState 0
