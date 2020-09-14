@@ -1,35 +1,32 @@
 module Main where
 
 import Control.Monad.Except
-import Control.Monad.Reader
-import Control.Monad.State
-import Data.Map (Map)
+import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Map as Map
-import Data.ProtoLens (Message, defMessage)
-import Data.ProtoLens.Prism
 import qualified Data.Text as Text
+import GHC.Generics
 import Lens.Family2
 import Network.Flink.Stateful
-import qualified Proto.Example as EX
-import qualified Proto.Example_Fields as EX
 import Network.Wai.Handler.Warp (run)
 import Network.Wai.Middleware.RequestLogger
-import GHC.Generics
-import Data.Aeson (FromJSON, ToJSON)
+import qualified Proto.Example as EX
+import qualified Proto.Example_Fields as EX
+import Proto.RequestReply (ToFunction'InvocationBatchRequest)
 
-newtype GreeterState = GreeterState {
-  greeterStateCount :: Int
-} deriving (Generic, Show, ToJSON, FromJSON)
+newtype GreeterState = GreeterState
+  { greeterStateCount :: Int
+  }
+  deriving (Generic, Show, ToJSON, FromJSON)
 
 main :: IO ()
 main = do
   putStrLn "http://localhost:8000/"
-  run 8000 (logStdout $ createServantApp initialCtx functionTable)
+  run 8000 (logStdout $ createApp initialCtx functionTable)
   where
     initialCtx = GreeterState 0
 
 greeterEntry :: StatefulFunc GreeterState m => EX.GreeterRequest -> m ()
-greeterEntry msg = sendMsg msg ("greeting", "counter", msg ^. EX.name)
+greeterEntry msg = sendMsg ("greeting", "counter", msg ^. EX.name) msg
 
 counter :: StatefulFunc GreeterState m => EX.GreeterRequest -> m ()
 counter msg = do
@@ -39,6 +36,10 @@ counter msg = do
   where
     name = msg ^. EX.name
 
+functionTable ::
+  Map.Map
+    (Text.Text, Text.Text)
+    (ToFunction'InvocationBatchRequest -> Function GreeterState ())
 functionTable =
   Map.fromList
     [ (("greeting", "greeterEntry"), runInvocations greeterEntry),

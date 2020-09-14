@@ -1,4 +1,15 @@
-module Network.Flink.Stateful where
+module Network.Flink.Stateful (
+ StatefulFunc(
+  insideCtx,
+  getCtx,
+  setCtx,
+  modifyCtx,
+  sendMsg
+ ),
+ runInvocations,
+ createApp,
+ Function
+) where
 
 import Control.Monad.State
 import Data.Aeson (FromJSON, ToJSON)
@@ -15,7 +26,6 @@ import Data.ProtoLens.Any (UnpackError)
 import qualified Data.ProtoLens.Any as Any
 import Data.Either.Combinators (fromRight, mapLeft)
 import Network.Wai
-import Network.HTTP.Types
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.ByteString.Lazy (toStrict)
@@ -28,6 +38,8 @@ import qualified Data.Aeson as Aeson
 import Data.Foldable (Foldable(toList))
 import Network.Flink.ProtoServant
 import Servant
+import qualified Data.Text.Lazy.Encoding as T
+import Data.Text.Lazy (fromStrict)
 
 data (FromJSON ctx, ToJSON ctx) => Env ctx = Env 
   { envDefaultCtx :: ctx
@@ -63,8 +75,9 @@ class MonadIO m => StatefulFunc s m | m -> s where
   getCtx :: m s
   setCtx :: s -> m ()
   modifyCtx :: (s -> s) -> m ()
-  sendMsg :: Message a => a  -- ^ protobuf message to send
-    -> (Text, Text, Text)    -- ^ Function address (namespace, type, id)
+  sendMsg :: Message a
+    => (Text, Text, Text) -- ^ Function address (namespace, type, id)
+    -> a                  -- ^ protobuf message to send
     -> m ()
 
 instance (FromJSON s, ToJSON s) => StatefulFunc s (Function s) where
@@ -77,8 +90,7 @@ instance (FromJSON s, ToJSON s) => StatefulFunc s (Function s) where
     return $ fromMaybe defaultCtx state'
   setCtx new = modify (\old -> old { functionStateCtx = Just new, functionStateMutated = True })
   modifyCtx mutator = mutator <$> getCtx >>= setCtx
-  -- sendMsg msg addr = pure ()
-  sendMsg msg addr = do
+  sendMsg addr msg = do
       invocations <- gets functionStateInvocations
       modify (\old -> old { functionStateInvocations = invocation Seq.:<| invocations })
     where
@@ -129,17 +141,6 @@ createFlinkResp (FunctionState state' mutated invocations delayedInvocations egr
       & PR.stateValue .~ toStrict (Aeson.encode state')
       | mutated ]
 
-errorResp :: String -> Response
-errorResp = responseLBS status500 [("Content-Type", "text/plain")] . BSL.pack
-
-notFound :: Response
-notFound = responseLBS
-    status404
-    [("Content-Type", "text/plain")]
-    "404 - Not Found"
-
--- SERVANT TEST
-
 type FlinkApi =
   "statefun" :> ReqBody '[Proto] ToFunction :> Post '[Proto] FromFunction
 
@@ -171,6 +172,7 @@ flinkErrToServant err = case err of
   ProtoUnpackError unpackErr -> err400 { errBody = "Failed to unpack protobuf Any " <>  BSL.pack (show unpackErr) }
   ProtoDeserializeError protoErr -> err400 { errBody = "Could not deserialize protobuf " <> BSL.pack protoErr }
   AesonDecodeError aesonErr -> err400 { errBody = "Invalid JSON " <> BSL.pack aesonErr }
+  NoSuchFunction (namespace, type') -> err400 { errBody = "No such function " <> T.encodeUtf8 (fromStrict namespace) <> T.encodeUtf8 (fromStrict type') }
 
-createServantApp :: (ToJSON s, FromJSON s) => s -> Map (Text, Text) (PR.ToFunction'InvocationBatchRequest -> Function s ()) -> Application
-createServantApp initialCtx funcs = serve flinkApi (flinkServer initialCtx funcs)
+createApp :: (ToJSON s, FromJSON s) => s -> Map (Text, Text) (PR.ToFunction'InvocationBatchRequest -> Function s ()) -> Application
+createApp initialCtx funcs = serve flinkApi (flinkServer initialCtx funcs)

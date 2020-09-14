@@ -28,9 +28,9 @@ library
   build-tool-depends:  proto-lens-protoc:proto-lens-protoc
   hs-source-dirs:      src
   autogen-modules:     Proto.RequestReply Proto.RequestReply_Fields
-  other-modules:       Proto.RequestReply Proto.RequestReply_Fields
-                       Network.Flink.ProtoServant
+  other-modules:       Network.Flink.ProtoServant
   exposed-modules:     Network.Flink.Stateful
+                       Proto.RequestReply Proto.RequestReply_Fields
   -- exposed-modules:
   -- other-extensions:
   build-depends:       base >= 4 && < 5
