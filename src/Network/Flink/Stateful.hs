@@ -1,15 +1,13 @@
 module Network.Flink.Stateful where
 
-import Control.Monad.Identity (Identity)
 import Control.Monad.State
-import Data.Aeson (encode, FromJSON, ToJSON)
-import Data.ByteString (ByteString)
+import Data.Aeson (FromJSON, ToJSON)
 import Lens.Family2
 import Data.ProtoLens.Prism
 import Proto.RequestReply (ToFunction, FromFunction)
 import qualified Proto.RequestReply as PR
 import qualified Proto.RequestReply_Fields as PR
-import Data.ProtoLens (encodeMessage, decodeMessage, defMessage, Message)
+import Data.ProtoLens (defMessage, Message)
 import Control.Monad.Except
 import Data.Text (Text)
 import Proto.Google.Protobuf.Any (Any)
@@ -20,20 +18,15 @@ import Network.Wai
 import Network.HTTP.Types
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.ByteString.Lazy (fromStrict, toStrict)
+import Data.ByteString.Lazy (toStrict)
 import Control.Monad.Reader
 import qualified Data.ByteString.Lazy.Char8 as BSL
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import Data.Set (Set)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Aeson as Aeson
 import Data.Foldable (Foldable(toList))
-import Control.Exception (try)
 import Network.Flink.ProtoServant
-
--- SERVANT TEST
-import Control.Monad.ST.Lazy
 import Servant
 
 data (FromJSON ctx, ToJSON ctx) => Env ctx = Env 
@@ -80,8 +73,8 @@ instance (FromJSON s, ToJSON s) => StatefulFunc s (Function s) where
   insideCtx func = func <$> getCtx
   getCtx = do
     defaultCtx <- asks envDefaultCtx
-    state <- gets functionStateCtx
-    return $ fromMaybe defaultCtx state
+    state' <- gets functionStateCtx
+    return $ fromMaybe defaultCtx state'
   setCtx new = modify (\old -> old { functionStateCtx = Just new, functionStateMutated = True })
   modifyCtx mutator = mutator <$> getCtx >>= setCtx
   -- sendMsg msg addr = pure ()
@@ -89,13 +82,13 @@ instance (FromJSON s, ToJSON s) => StatefulFunc s (Function s) where
       invocations <- gets functionStateInvocations
       modify (\old -> old { functionStateInvocations = invocation Seq.:<| invocations })
     where
-      (namespace, funcType, id) = addr
+      (namespace, funcType, id') = addr
       packet = Any.pack msg
       target :: PR.Address
       target = defMessage
         & PR.namespace .~ namespace
         & PR.type' .~ funcType
-        & PR.id .~ id
+        & PR.id .~ id'
       invocation :: PR.FromFunction'Invocation
       invocation = defMessage
         & PR.target .~ target
@@ -109,27 +102,19 @@ data FlinkError = MissingInvocationBatch
   deriving (Show, Eq)
 
 invoke :: (StatefulFunc s m, MonadError FlinkError m, Message a, MonadReader (Env s) m, FromJSON s, ToJSON s) => (a -> m b) -> Any -> m b
-invoke f input = do
-  input <- liftEither (mapLeft ProtoUnpackError $ Any.unpack input)
-  f input
-  where
-    getInitialCtx def pv = fromRight def (mapLeft AesonDecodeError $ Aeson.eitherDecode (BSL.fromStrict $ pv ^. PR.stateValue))
+invoke f input = f =<< liftEither (mapLeft ProtoUnpackError $ Any.unpack input)
 
 runInvocations :: (StatefulFunc s m, MonadError FlinkError m, Message a, MonadReader (Env s) m, FromJSON s, ToJSON s) => (a -> m ()) -> PR.ToFunction'InvocationBatchRequest -> m ()
 runInvocations func invocationBatch = do
     defaultCtx <- asks envDefaultCtx
     let initialCtx = maybe defaultCtx (getInitialCtx defaultCtx) (listToMaybe $ invocationBatch ^. PR.state)
     setInitialCtx initialCtx
-    let invocations = getInvocations invocationBatch
     mapM_ (invoke func) ((^. PR.argument) <$> invocationBatch ^. PR.invocations)
   where
     getInitialCtx def pv = fromRight def (mapLeft AesonDecodeError $ Aeson.eitherDecode (BSL.fromStrict $ pv ^. PR.stateValue))
 
-    getInvocations batch = fmap (getInvocation (batch ^. PR.target) (listToMaybe $ batch ^. PR.state)) (batch ^. PR.invocations)
-    getInvocation target state invocation = (state , target, invocation ^. PR.argument)
-
 createFlinkResp :: (FromJSON s, ToJSON s) => FunctionState s -> FromFunction
-createFlinkResp (FunctionState state mutated invocations delayedInvocations egresses) =
+createFlinkResp (FunctionState state' mutated invocations delayedInvocations egresses) =
   defMessage & PR.invocationResult .~
     (defMessage 
       & PR.stateMutations .~ toList stateMutations
@@ -141,7 +126,7 @@ createFlinkResp (FunctionState state mutated invocations delayedInvocations egre
     stateMutations = [ defMessage 
       & PR.mutationType .~ PR.FromFunction'PersistedValueMutation'MODIFY
       & PR.stateName .~ "flink_state"
-      & PR.stateValue .~ toStrict (Aeson.encode state)
+      & PR.stateValue .~ toStrict (Aeson.encode state')
       | mutated ]
 
 errorResp :: String -> Response
@@ -163,15 +148,14 @@ flinkApi = Proxy
 
 flinkServer :: (ToJSON s, FromJSON s) => s -> Map (Text, Text) (PR.ToFunction'InvocationBatchRequest -> Function s ()) -> Server FlinkApi
 flinkServer initialCtx functions toFunction = do
-  batch <- getBatch toFunction
-  (res, (namespace, type', id)) <- runBatch toFunction
-  let env = Env initialCtx namespace type' id
-  (error, finalState) <- liftIO $ runReaderT (runStateT (runExceptT $ runFunction res) newState) env
-  liftEither (mapLeft flinkErrToServant error)
+  (res, (namespace, type', id')) <- runBatch toFunction
+  let env = Env initialCtx namespace type' id'
+  (err, finalState) <- liftIO $ runReaderT (runStateT (runExceptT $ runFunction res) newState) env
+  liftEither (mapLeft flinkErrToServant err)
   return $ createFlinkResp finalState
   where
-    runBatch toFunction = do
-      batch <- getBatch toFunction
+    runBatch toFunc = do
+      batch <- getBatch toFunc
       (function, address) <- findFunc (batch ^. PR.target)
       pure (function batch, address)
     getBatch input = maybe (throwError $ flinkErrToServant MissingInvocationBatch) return (input ^? PR.maybe'request . _Just . PR._ToFunction'Invocation')
@@ -185,7 +169,7 @@ flinkErrToServant :: FlinkError -> ServerError
 flinkErrToServant err = case err of
   MissingInvocationBatch -> err400 { errBody = "Invocation batch missing" }
   ProtoUnpackError unpackErr -> err400 { errBody = "Failed to unpack protobuf Any " <>  BSL.pack (show unpackErr) }
-  ProtoDeserializeError err -> err400 { errBody = "Could not deserialize protobuf " <> BSL.pack err }
+  ProtoDeserializeError protoErr -> err400 { errBody = "Could not deserialize protobuf " <> BSL.pack protoErr }
   AesonDecodeError aesonErr -> err400 { errBody = "Invalid JSON " <> BSL.pack aesonErr }
 
 createServantApp :: (ToJSON s, FromJSON s) => s -> Map (Text, Text) (PR.ToFunction'InvocationBatchRequest -> Function s ()) -> Application

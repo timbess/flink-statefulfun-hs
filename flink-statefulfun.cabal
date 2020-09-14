@@ -24,7 +24,7 @@ custom-setup
   setup-depends: base, Cabal, proto-lens-setup
 
 library
-  ghc-options:         -Wall -Werror -fwarn-unused-imports
+  ghc-options:         -Wall -Werror
   build-tool-depends:  proto-lens-protoc:proto-lens-protoc
   hs-source-dirs:      src
   autogen-modules:     Proto.RequestReply Proto.RequestReply_Fields
@@ -78,7 +78,7 @@ executable flink-statefulfun-exe
   -- about making subprocesses from a static binary
   -- if you have an issue cause of that.... sorry
   -- ld-options:          -static -pthread
-  ghc-options:         -Wall -fwarn-unused-imports -with-rtsopts=-T -threaded -O2
+  ghc-options:         -Wall -Werror -with-rtsopts=-T -threaded -O2
 
   main-is:             Main.hs
   hs-source-dirs:      main
