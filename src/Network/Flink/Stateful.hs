@@ -131,11 +131,11 @@ instance (FromJSON s, ToJSON s) => StatefulFunc s (Function s) where
         & PR.target .~ target
         & PR.argument .~ Any.pack msg
   sendEgressMsg (namespace, egressType) msg = do
-      invocations <- gets functionStateEgressMessages
-      modify (\old -> old { functionStateEgressMessages = invocations Seq.:|> invocation })
+      egresses <- gets functionStateEgressMessages
+      modify (\old -> old { functionStateEgressMessages = egresses Seq.:|> egressMsg })
     where
-      invocation :: PR.FromFunction'EgressMessage
-      invocation = defMessage
+      egressMsg :: PR.FromFunction'EgressMessage
+      egressMsg = defMessage
         & PR.egressNamespace .~ namespace
         & PR.egressType .~ egressType
         & PR.argument .~ Any.pack msg
