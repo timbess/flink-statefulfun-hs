@@ -10,6 +10,8 @@ module Network.Flink.Stateful (
  ),
  runInvocations,
  createApp,
+ flinkServer,
+ flinkApi,
  kafkaRecord,
  Function
 ) where
