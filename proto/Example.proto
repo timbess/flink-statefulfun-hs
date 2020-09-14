@@ -5,3 +5,7 @@ package example;
 message GreeterRequest {
   string name = 1;
 }
+
+message GreeterResponse {
+  string greeting = 1;
+}

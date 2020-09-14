@@ -28,9 +28,11 @@ library
   build-tool-depends:  proto-lens-protoc:proto-lens-protoc
   hs-source-dirs:      src
   autogen-modules:     Proto.RequestReply Proto.RequestReply_Fields
+                       Proto.Kafka Proto.Kafka_Fields
   other-modules:       Network.Flink.ProtoServant
   exposed-modules:     Network.Flink.Stateful
                        Proto.RequestReply Proto.RequestReply_Fields
+                       Proto.Kafka Proto.Kafka_Fields
   -- exposed-modules:
   -- other-extensions:
   build-depends:       base >= 4 && < 5

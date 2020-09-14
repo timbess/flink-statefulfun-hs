@@ -1,9 +1,9 @@
 module Main where
 
-import Control.Monad.Except
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Map as Map
-import qualified Data.Text as Text
+import qualified Data.Text as T
+import Data.Text (Text)
 import GHC.Generics
 import Lens.Family2
 import Network.Flink.Stateful
@@ -12,6 +12,7 @@ import Network.Wai.Middleware.RequestLogger
 import qualified Proto.Example as EX
 import qualified Proto.Example_Fields as EX
 import Proto.RequestReply (ToFunction'InvocationBatchRequest)
+import Data.ProtoLens (defMessage)
 
 newtype GreeterState = GreeterState
   { greeterStateCount :: Int
@@ -31,14 +32,19 @@ greeterEntry msg = sendMsg ("greeting", "counter", msg ^. EX.name) msg
 counter :: StatefulFunc GreeterState m => EX.GreeterRequest -> m ()
 counter msg = do
   newCount <- (+ 1) <$> insideCtx greeterStateCount
-  liftIO $ putStrLn $ "Saw " <> Text.unpack name <> " " <> show newCount <> " time(s)"
+  let respMsg = "Saw " <> T.unpack name <> " " <> show newCount <> " time(s)"
+  
+  sendEgressMsg ("greeting", "greets") (kafkaRecord "greets" name $ response (T.pack respMsg))
   modifyCtx (\old -> old {greeterStateCount = newCount})
   where
     name = msg ^. EX.name
+    response :: Text -> EX.GreeterResponse
+    response greeting = defMessage
+      & EX.greeting .~ greeting
 
 functionTable ::
   Map.Map
-    (Text.Text, Text.Text)
+    (Text, Text)
     (ToFunction'InvocationBatchRequest -> Function GreeterState ())
 functionTable =
   Map.fromList

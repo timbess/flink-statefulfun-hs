@@ -4,10 +4,13 @@ module Network.Flink.Stateful (
   getCtx,
   setCtx,
   modifyCtx,
-  sendMsg
+  sendMsg,
+  sendMsgDelay,
+  sendEgressMsg
  ),
  runInvocations,
  createApp,
+ kafkaRecord,
  Function
 ) where
 
@@ -18,14 +21,13 @@ import Data.ProtoLens.Prism
 import Proto.RequestReply (ToFunction, FromFunction)
 import qualified Proto.RequestReply as PR
 import qualified Proto.RequestReply_Fields as PR
-import Data.ProtoLens (defMessage, Message)
+import Data.ProtoLens (encodeMessage, defMessage, Message)
 import Control.Monad.Except
 import Data.Text (Text)
 import Proto.Google.Protobuf.Any (Any)
 import Data.ProtoLens.Any (UnpackError)
 import qualified Data.ProtoLens.Any as Any
 import Data.Either.Combinators (fromRight, mapLeft)
-import Network.Wai
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.ByteString.Lazy (toStrict)
@@ -36,10 +38,12 @@ import qualified Data.Sequence as Seq
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Aeson as Aeson
 import Data.Foldable (Foldable(toList))
-import Network.Flink.ProtoServant
+import Network.Flink.ProtoServant ( Proto )
 import Servant
 import qualified Data.Text.Lazy.Encoding as T
 import Data.Text.Lazy (fromStrict)
+import qualified Proto.Kafka as Kafka
+import qualified Proto.Kafka_Fields as Kafka
 
 data (FromJSON ctx, ToJSON ctx) => Env ctx = Env 
   { envDefaultCtx :: ctx
@@ -79,6 +83,15 @@ class MonadIO m => StatefulFunc s m | m -> s where
     => (Text, Text, Text) -- ^ Function address (namespace, type, id)
     -> a                  -- ^ protobuf message to send
     -> m ()
+  sendMsgDelay :: Message a
+    => (Text, Text, Text) -- ^ Function address (namespace, type, id)
+    -> Int                -- ^ delay before message send
+    -> a                  -- ^ protobuf message to send
+    -> m ()
+  sendEgressMsg :: Message a
+    => (Text, Text)       -- ^ egress address (namespace, type)
+    -> a                  -- ^ protobuf message to send (should be a Kafka or Kinesis protobuf record)
+    -> m ()
 
 instance (FromJSON s, ToJSON s) => StatefulFunc s (Function s) where
   setInitialCtx ctx = modify (\old -> old { functionStateCtx = Just ctx})
@@ -90,12 +103,10 @@ instance (FromJSON s, ToJSON s) => StatefulFunc s (Function s) where
     return $ fromMaybe defaultCtx state'
   setCtx new = modify (\old -> old { functionStateCtx = Just new, functionStateMutated = True })
   modifyCtx mutator = mutator <$> getCtx >>= setCtx
-  sendMsg addr msg = do
+  sendMsg (namespace, funcType, id') msg = do
       invocations <- gets functionStateInvocations
-      modify (\old -> old { functionStateInvocations = invocation Seq.:<| invocations })
+      modify (\old -> old { functionStateInvocations = invocations Seq.:|> invocation })
     where
-      (namespace, funcType, id') = addr
-      packet = Any.pack msg
       target :: PR.Address
       target = defMessage
         & PR.namespace .~ namespace
@@ -104,7 +115,30 @@ instance (FromJSON s, ToJSON s) => StatefulFunc s (Function s) where
       invocation :: PR.FromFunction'Invocation
       invocation = defMessage
         & PR.target .~ target
-        & PR.argument .~ packet
+        & PR.argument .~ Any.pack msg
+  sendMsgDelay (namespace, funcType, id') delay msg = do
+      invocations <- gets functionStateDelayedInvocations
+      modify (\old -> old { functionStateDelayedInvocations = invocations Seq.:|> invocation })
+    where
+      target :: PR.Address
+      target = defMessage
+        & PR.namespace .~ namespace
+        & PR.type' .~ funcType
+        & PR.id .~ id'
+      invocation :: PR.FromFunction'DelayedInvocation
+      invocation = defMessage
+        & PR.delayInMs .~ fromIntegral delay
+        & PR.target .~ target
+        & PR.argument .~ Any.pack msg
+  sendEgressMsg (namespace, egressType) msg = do
+      invocations <- gets functionStateEgressMessages
+      modify (\old -> old { functionStateEgressMessages = invocations Seq.:|> invocation })
+    where
+      invocation :: PR.FromFunction'EgressMessage
+      invocation = defMessage
+        & PR.egressNamespace .~ namespace
+        & PR.egressType .~ egressType
+        & PR.argument .~ Any.pack msg
 
 data FlinkError = MissingInvocationBatch
                 | ProtoUnpackError UnpackError
@@ -176,3 +210,10 @@ flinkErrToServant err = case err of
 
 createApp :: (ToJSON s, FromJSON s) => s -> Map (Text, Text) (PR.ToFunction'InvocationBatchRequest -> Function s ()) -> Application
 createApp initialCtx funcs = serve flinkApi (flinkServer initialCtx funcs)
+
+kafkaRecord :: (Message v) => Text -> Text -> v -> Kafka.KafkaProducerRecord
+kafkaRecord topic k v = 
+  defMessage
+    & Kafka.topic .~ topic
+    & Kafka.key .~ k
+    & Kafka.valueBytes .~ encodeMessage v
