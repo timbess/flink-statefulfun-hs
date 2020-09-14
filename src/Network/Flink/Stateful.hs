@@ -18,7 +18,6 @@ import qualified Data.ProtoLens.Any as Any
 import Data.Either.Combinators (fromRight, mapLeft)
 import Network.Wai
 import Network.HTTP.Types
-import Network.Wai.Handler.Warp (run)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.ByteString.Lazy (fromStrict, toStrict)
@@ -34,6 +33,7 @@ import Control.Exception (try)
 import Network.Flink.ProtoServant
 
 -- SERVANT TEST
+import Control.Monad.ST.Lazy
 import Servant
 
 data (FromJSON ctx, ToJSON ctx) => Env ctx = Env 
