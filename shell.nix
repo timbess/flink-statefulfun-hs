@@ -13,6 +13,7 @@ in
       gmp5 gmp5.static
       gcc
       protobuf
+      wget
       (libffi.overrideAttrs (old: { dontDisableStatic = true; }))
     ]) ++ (with pkgs.haskellPackages; [
       hlint
