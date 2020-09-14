@@ -1,0 +1,7 @@
+packages: .
+          ../..
+
+source-repository-package
+    type: git
+    location: https://github.com/tdbgamer/servant-ekg
+    tag: 2d44ca799a28e99f106c0d584d2f1482294e2a2b

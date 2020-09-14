@@ -25,12 +25,12 @@ import random
 
 from kafka.errors import NoBrokersAvailable
 
-from Example_pb2 import GreeterRequest
+from Example_pb2 import GreeterRequest, GreeterResponse
 
 from kafka import KafkaProducer
 from kafka import KafkaConsumer
 
-KAFKA_BROKER = "localhost:9092"
+KAFKA_BROKER = "kafka-broker:9092"
 NAMES = ["Jerry", "George", "Elaine", "Kramer", "Newman", "Frank"]
 
 
@@ -51,22 +51,28 @@ def produce():
     for request in random_requests():
         key = request.name.encode('utf-8')
         val = request.SerializeToString()
-        print("Publishing {} {}".format(key, val))
+        print("Publishing {} {}".format(key, val), flush=True)
         producer.send(topic='names', key=key, value=val)
         producer.flush()
-        # time.sleep(delay_seconds)
+        time.sleep(delay_seconds)
 
 
-# def consume():
-#     consumer = KafkaConsumer(
-#         'greetings',
-#         bootstrap_servers=[KAFKA_BROKER],
-#         auto_offset_reset='earliest',
-#         group_id='event-gen')
-#     for message in consumer:
-#         response = GreeterResponse()
-#         response.ParseFromString(message.value)
-#         print("%s:\t%s" % (response.name, response.greeting), flush=True)
+def consume():
+    while True:
+        try:
+            print("MAKING CONSUMER")
+            consumer = KafkaConsumer(
+                'greets',
+                bootstrap_servers=[KAFKA_BROKER],
+                auto_offset_reset='earliest',
+                group_id='event-gen')
+            print("MADE CONSUMER")
+            for message in consumer:
+                response = GreeterResponse()
+                response.ParseFromString(message.value)
+                print("Response: {}".format(response.greeting), flush=True)
+        except Exception as err:
+            print("Consumer failed: {}".format(err))
 
 
 def handler(number, frame):
@@ -94,11 +100,11 @@ def main():
     producer = threading.Thread(target=safe_loop, args=[produce])
     producer.start()
 
-    # consumer = threading.Thread(target=safe_loop, args=[consume])
-    # consumer.start()
+    consumer = threading.Thread(target=safe_loop, args=[consume])
+    consumer.start()
 
     producer.join()
-    # consumer.join()
+    consumer.join()
 
 
 if __name__ == "__main__":
