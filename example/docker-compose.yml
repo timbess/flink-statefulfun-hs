@@ -51,9 +51,11 @@ services:
 
   haskell-worker:
     command: ./flink-statefulfun-greeter
-    build:
-      context: ..
-      dockerfile: example/greeter/Dockerfile
+    image: tdbgamer/flink-statefulfun-hs-greeter
+    # Uncomment to build locally
+    # build:
+    #   context: ..
+    #   dockerfile: example/greeter/Dockerfile
     expose:
       - "8000"
 
