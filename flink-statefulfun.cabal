@@ -39,7 +39,6 @@ library
                      , text >= 1.2 && < 2
                      , bytestring >= 0.10 && < 1
                      , either >= 5 && < 6
-                     , aeson >= 1.5 && < 2
                      , containers >= 0.5 && < 1
                      , wai >= 3 && < 4
                      , warp >= 3 && < 4
@@ -87,6 +86,7 @@ executable flink-statefulfun-exe
   -- other-extensions:
   build-depends:       base >= 4 && < 5
                      , aeson >= 1.5 && < 2
+                     , bytestring >= 0.10 && < 1
                      , text >= 1.2.4.0 && < 2
                      , flink-statefulfun
                      , lens-family >= 2 && < 3

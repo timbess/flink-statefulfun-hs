@@ -1,76 +1,79 @@
-module Network.Flink.Stateful (
- StatefulFunc(
-  insideCtx,
-  getCtx,
-  setCtx,
-  modifyCtx,
-  sendMsg,
-  sendMsgDelay,
-  sendEgressMsg
- ),
- runInvocations,
- createApp,
- flinkServer,
- flinkApi,
- kafkaRecord,
- Function
-) where
+module Network.Flink.Stateful
+  ( StatefulFunc
+      ( insideCtx,
+        getCtx,
+        setCtx,
+        modifyCtx,
+        sendMsg,
+        sendMsgDelay,
+        sendEgressMsg
+      ),
+    runInvocations,
+    createApp,
+    flinkServer,
+    flinkApi,
+    kafkaRecord,
+    Function,
+    FlinkState (..),
+  )
+where
 
-import Control.Monad.State
-import Data.Aeson (FromJSON, ToJSON)
-import Lens.Family2
-import Data.ProtoLens.Prism
-import Proto.RequestReply (ToFunction, FromFunction)
-import qualified Proto.RequestReply as PR
-import qualified Proto.RequestReply_Fields as PR
-import Data.ProtoLens (encodeMessage, defMessage, Message)
 import Control.Monad.Except
-import Data.Text (Text)
-import Proto.Google.Protobuf.Any (Any)
-import Data.ProtoLens.Any (UnpackError)
-import qualified Data.ProtoLens.Any as Any
-import Data.Either.Combinators (fromRight, mapLeft)
+import Control.Monad.Reader
+import Control.Monad.State
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Lazy.Char8 as BSL
+import Data.Either.Combinators (mapLeft)
+import Data.Foldable (Foldable (toList))
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.ByteString.Lazy (toStrict)
-import Control.Monad.Reader
-import qualified Data.ByteString.Lazy.Char8 as BSL
+import Data.Maybe (listToMaybe)
+import Data.ProtoLens (Message, defMessage, encodeMessage)
+import Data.ProtoLens.Any (UnpackError)
+import qualified Data.ProtoLens.Any as Any
+import Data.ProtoLens.Prism
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import Data.Maybe (fromMaybe, listToMaybe)
-import qualified Data.Aeson as Aeson
-import Data.Foldable (Foldable(toList))
-import Network.Flink.ProtoServant ( Proto )
-import Servant
-import qualified Data.Text.Lazy.Encoding as T
+import Data.Text (Text)
 import Data.Text.Lazy (fromStrict)
+import qualified Data.Text.Lazy.Encoding as T
+import Lens.Family2
+import Network.Flink.ProtoServant (Proto)
+import Proto.Google.Protobuf.Any (Any)
 import qualified Proto.Kafka as Kafka
 import qualified Proto.Kafka_Fields as Kafka
+import Proto.RequestReply (FromFunction, ToFunction)
+import qualified Proto.RequestReply as PR
+import qualified Proto.RequestReply_Fields as PR
+import Servant
 
-data (FromJSON ctx, ToJSON ctx) => Env ctx = Env 
-  { envDefaultCtx :: ctx
-  , envFunctionNamespace :: Text
-  , envFunctionType :: Text
-  , envFunctionId :: Text
+data Env = Env
+  { envFunctionNamespace :: Text,
+    envFunctionType :: Text,
+    envFunctionId :: Text
   }
   deriving (Show)
 
-data (FromJSON ctx, ToJSON ctx) => FunctionState ctx = FunctionState
-  { functionStateCtx :: Maybe ctx
-  , functionStateMutated :: Bool
-  , functionStateInvocations :: Seq PR.FromFunction'Invocation
-  , functionStateDelayedInvocations :: Seq PR.FromFunction'DelayedInvocation
-  , functionStateEgressMessages :: Seq PR.FromFunction'EgressMessage
+data FunctionState ctx = FunctionState
+  { functionStateCtx :: ctx,
+    functionStateMutated :: Bool,
+    functionStateInvocations :: Seq PR.FromFunction'Invocation,
+    functionStateDelayedInvocations :: Seq PR.FromFunction'DelayedInvocation,
+    functionStateEgressMessages :: Seq PR.FromFunction'EgressMessage
   }
   deriving (Show)
 
-newState :: (FromJSON a, ToJSON a) => FunctionState a
-newState = FunctionState Nothing False mempty mempty mempty
+newState :: a -> FunctionState a
+newState initialCtx = FunctionState initialCtx False mempty mempty mempty
 
-newtype Function s a = Function {runFunction :: ExceptT FlinkError (StateT (FunctionState s) (ReaderT (Env s) IO)) a}
-  deriving (Monad, Applicative, Functor, MonadState (FunctionState s), MonadError FlinkError, MonadIO, MonadReader (Env s))
+newtype Function s a = Function {runFunction :: ExceptT FlinkError (StateT (FunctionState s) (ReaderT Env IO)) a}
+  deriving (Monad, Applicative, Functor, MonadState (FunctionState s), MonadError FlinkError, MonadIO, MonadReader Env)
 
 -- deriving instance  Monad (StateT (FunctionState ctx) Identity) => Monad Function
+
+class FlinkState s where
+  decodeState :: ByteString -> Either String s
+  encodeState :: s -> ByteString
 
 class MonadIO m => StatefulFunc s m | m -> s where
   -- Internal
@@ -81,101 +84,123 @@ class MonadIO m => StatefulFunc s m | m -> s where
   getCtx :: m s
   setCtx :: s -> m ()
   modifyCtx :: (s -> s) -> m ()
-  sendMsg :: Message a
-    => (Text, Text, Text) -- ^ Function address (namespace, type, id)
-    -> a                  -- ^ protobuf message to send
-    -> m ()
-  sendMsgDelay :: Message a
-    => (Text, Text, Text) -- ^ Function address (namespace, type, id)
-    -> Int                -- ^ delay before message send
-    -> a                  -- ^ protobuf message to send
-    -> m ()
-  sendEgressMsg :: Message a
-    => (Text, Text)       -- ^ egress address (namespace, type)
-    -> a                  -- ^ protobuf message to send (should be a Kafka or Kinesis protobuf record)
-    -> m ()
+  sendMsg ::
+    Message a =>
+    -- | Function address (namespace, type, id)
+    (Text, Text, Text) ->
+    -- | protobuf message to send
+    a ->
+    m ()
+  sendMsgDelay ::
+    Message a =>
+    -- | Function address (namespace, type, id)
+    (Text, Text, Text) ->
+    -- | delay before message send
+    Int ->
+    -- | protobuf message to send
+    a ->
+    m ()
+  sendEgressMsg ::
+    Message a =>
+    -- | egress address (namespace, type)
+    (Text, Text) ->
+    -- | protobuf message to send (should be a Kafka or Kinesis protobuf record)
+    a ->
+    m ()
 
-instance (FromJSON s, ToJSON s) => StatefulFunc s (Function s) where
-  setInitialCtx ctx = modify (\old -> old { functionStateCtx = Just ctx})
+instance (FlinkState s) => StatefulFunc s (Function s) where
+  setInitialCtx ctx = modify (\old -> old {functionStateCtx = ctx})
 
   insideCtx func = func <$> getCtx
-  getCtx = do
-    defaultCtx <- asks envDefaultCtx
-    state' <- gets functionStateCtx
-    return $ fromMaybe defaultCtx state'
-  setCtx new = modify (\old -> old { functionStateCtx = Just new, functionStateMutated = True })
+  getCtx = gets functionStateCtx
+  setCtx new = modify (\old -> old {functionStateCtx = new, functionStateMutated = True})
   modifyCtx mutator = mutator <$> getCtx >>= setCtx
   sendMsg (namespace, funcType, id') msg = do
-      invocations <- gets functionStateInvocations
-      modify (\old -> old { functionStateInvocations = invocations Seq.:|> invocation })
+    invocations <- gets functionStateInvocations
+    modify (\old -> old {functionStateInvocations = invocations Seq.:|> invocation})
     where
       target :: PR.Address
-      target = defMessage
-        & PR.namespace .~ namespace
-        & PR.type' .~ funcType
-        & PR.id .~ id'
+      target =
+        defMessage
+          & PR.namespace .~ namespace
+          & PR.type' .~ funcType
+          & PR.id .~ id'
       invocation :: PR.FromFunction'Invocation
-      invocation = defMessage
-        & PR.target .~ target
-        & PR.argument .~ Any.pack msg
+      invocation =
+        defMessage
+          & PR.target .~ target
+          & PR.argument .~ Any.pack msg
   sendMsgDelay (namespace, funcType, id') delay msg = do
-      invocations <- gets functionStateDelayedInvocations
-      modify (\old -> old { functionStateDelayedInvocations = invocations Seq.:|> invocation })
+    invocations <- gets functionStateDelayedInvocations
+    modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation})
     where
       target :: PR.Address
-      target = defMessage
-        & PR.namespace .~ namespace
-        & PR.type' .~ funcType
-        & PR.id .~ id'
+      target =
+        defMessage
+          & PR.namespace .~ namespace
+          & PR.type' .~ funcType
+          & PR.id .~ id'
       invocation :: PR.FromFunction'DelayedInvocation
-      invocation = defMessage
-        & PR.delayInMs .~ fromIntegral delay
-        & PR.target .~ target
-        & PR.argument .~ Any.pack msg
+      invocation =
+        defMessage
+          & PR.delayInMs .~ fromIntegral delay
+          & PR.target .~ target
+          & PR.argument .~ Any.pack msg
   sendEgressMsg (namespace, egressType) msg = do
-      egresses <- gets functionStateEgressMessages
-      modify (\old -> old { functionStateEgressMessages = egresses Seq.:|> egressMsg })
+    egresses <- gets functionStateEgressMessages
+    modify (\old -> old {functionStateEgressMessages = egresses Seq.:|> egressMsg})
     where
       egressMsg :: PR.FromFunction'EgressMessage
-      egressMsg = defMessage
-        & PR.egressNamespace .~ namespace
-        & PR.egressType .~ egressType
-        & PR.argument .~ Any.pack msg
+      egressMsg =
+        defMessage
+          & PR.egressNamespace .~ namespace
+          & PR.egressType .~ egressType
+          & PR.argument .~ Any.pack msg
 
-data FlinkError = MissingInvocationBatch
-                | ProtoUnpackError UnpackError
-                | ProtoDeserializeError String
-                | AesonDecodeError String
-                | NoSuchFunction (Text, Text)
+data FlinkError
+  = MissingInvocationBatch
+  | ProtoUnpackError UnpackError
+  | ProtoDeserializeError String
+  | StateDecodeError String
+  | NoSuchFunction (Text, Text)
   deriving (Show, Eq)
 
-invoke :: (StatefulFunc s m, MonadError FlinkError m, Message a, MonadReader (Env s) m, FromJSON s, ToJSON s) => (a -> m b) -> Any -> m b
+invoke :: (FlinkState s, StatefulFunc s m, MonadError FlinkError m, Message a, MonadReader Env m) => (a -> m b) -> Any -> m b
 invoke f input = f =<< liftEither (mapLeft ProtoUnpackError $ Any.unpack input)
 
-runInvocations :: (StatefulFunc s m, MonadError FlinkError m, Message a, MonadReader (Env s) m, FromJSON s, ToJSON s) => (a -> m ()) -> PR.ToFunction'InvocationBatchRequest -> m ()
+runInvocations :: (FlinkState s, StatefulFunc s m, MonadError FlinkError m, Message a, MonadReader Env m, MonadState (FunctionState s) m) => (a -> m ()) -> PR.ToFunction'InvocationBatchRequest -> m ()
 runInvocations func invocationBatch = do
-    defaultCtx <- asks envDefaultCtx
-    let initialCtx = maybe defaultCtx (getInitialCtx defaultCtx) (listToMaybe $ invocationBatch ^. PR.state)
-    setInitialCtx initialCtx
-    mapM_ (invoke func) ((^. PR.argument) <$> invocationBatch ^. PR.invocations)
+  defaultCtx <- gets functionStateCtx
+  let initialCtx = getInitialCtx defaultCtx (listToMaybe $ invocationBatch ^. PR.state)
+  case initialCtx of
+    Left err -> throwError err
+    Right ctx -> setInitialCtx ctx
+  mapM_ (invoke func) ((^. PR.argument) <$> invocationBatch ^. PR.invocations)
   where
-    getInitialCtx def pv = fromRight def (mapLeft AesonDecodeError $ Aeson.eitherDecode (BSL.fromStrict $ pv ^. PR.stateValue))
+    getInitialCtx def pv = handleEmptyState def $ (^. PR.stateValue) <$> pv
+    handleEmptyState def state' = case state' of
+      Just "" -> return def
+      Just other -> mapLeft StateDecodeError $ decodeState other
+      Nothing -> return def
 
-createFlinkResp :: (FromJSON s, ToJSON s) => FunctionState s -> FromFunction
+createFlinkResp :: (FlinkState s) => FunctionState s -> FromFunction
 createFlinkResp (FunctionState state' mutated invocations delayedInvocations egresses) =
-  defMessage & PR.invocationResult .~
-    (defMessage 
-      & PR.stateMutations .~ toList stateMutations
-      & PR.outgoingMessages .~ toList invocations
-      & PR.delayedInvocations .~ toList delayedInvocations
-      & PR.outgoingEgresses .~ toList egresses)
+  defMessage & PR.invocationResult
+    .~ ( defMessage
+           & PR.stateMutations .~ toList stateMutations
+           & PR.outgoingMessages .~ toList invocations
+           & PR.delayedInvocations .~ toList delayedInvocations
+           & PR.outgoingEgresses .~ toList egresses
+       )
   where
     stateMutations :: [PR.FromFunction'PersistedValueMutation]
-    stateMutations = [ defMessage 
-      & PR.mutationType .~ PR.FromFunction'PersistedValueMutation'MODIFY
-      & PR.stateName .~ "flink_state"
-      & PR.stateValue .~ toStrict (Aeson.encode state')
-      | mutated ]
+    stateMutations =
+      [ defMessage
+          & PR.mutationType .~ PR.FromFunction'PersistedValueMutation'MODIFY
+          & PR.stateName .~ "flink_state"
+          & PR.stateValue .~ encodeState state'
+        | mutated
+      ]
 
 type FlinkApi =
   "statefun" :> ReqBody '[Proto] ToFunction :> Post '[Proto] FromFunction
@@ -183,11 +208,11 @@ type FlinkApi =
 flinkApi :: Proxy FlinkApi
 flinkApi = Proxy
 
-flinkServer :: (ToJSON s, FromJSON s) => s -> Map (Text, Text) (PR.ToFunction'InvocationBatchRequest -> Function s ()) -> Server FlinkApi
+flinkServer :: (FlinkState s) => s -> Map (Text, Text) (PR.ToFunction'InvocationBatchRequest -> Function s ()) -> Server FlinkApi
 flinkServer initialCtx functions toFunction = do
   (res, (namespace, type', id')) <- runBatch toFunction
-  let env = Env initialCtx namespace type' id'
-  (err, finalState) <- liftIO $ runReaderT (runStateT (runExceptT $ runFunction res) newState) env
+  let env = Env namespace type' id'
+  (err, finalState) <- liftIO $ runReaderT (runStateT (runExceptT $ runFunction res) (newState initialCtx)) env
   liftEither (mapLeft flinkErrToServant err)
   return $ createFlinkResp finalState
   where
@@ -197,24 +222,24 @@ flinkServer initialCtx functions toFunction = do
       pure (function batch, address)
     getBatch input = maybe (throwError $ flinkErrToServant MissingInvocationBatch) return (input ^? PR.maybe'request . _Just . PR._ToFunction'Invocation')
     findFunc addr = do
-        res <- maybe (throwError $ flinkErrToServant $ NoSuchFunction (namespace, type')) return (Map.lookup (namespace, type') functions)
-        return (res, address)
+      res <- maybe (throwError $ flinkErrToServant $ NoSuchFunction (namespace, type')) return (Map.lookup (namespace, type') functions)
+      return (res, address)
       where
         address@(namespace, type', _) = (addr ^. PR.namespace, addr ^. PR.type', addr ^. PR.id)
 
 flinkErrToServant :: FlinkError -> ServerError
 flinkErrToServant err = case err of
-  MissingInvocationBatch -> err400 { errBody = "Invocation batch missing" }
-  ProtoUnpackError unpackErr -> err400 { errBody = "Failed to unpack protobuf Any " <>  BSL.pack (show unpackErr) }
-  ProtoDeserializeError protoErr -> err400 { errBody = "Could not deserialize protobuf " <> BSL.pack protoErr }
-  AesonDecodeError aesonErr -> err400 { errBody = "Invalid JSON " <> BSL.pack aesonErr }
-  NoSuchFunction (namespace, type') -> err400 { errBody = "No such function " <> T.encodeUtf8 (fromStrict namespace) <> T.encodeUtf8 (fromStrict type') }
+  MissingInvocationBatch -> err400 {errBody = "Invocation batch missing"}
+  ProtoUnpackError unpackErr -> err400 {errBody = "Failed to unpack protobuf Any " <> BSL.pack (show unpackErr)}
+  ProtoDeserializeError protoErr -> err400 {errBody = "Could not deserialize protobuf " <> BSL.pack protoErr}
+  StateDecodeError decodeErr -> err400 {errBody = "Invalid JSON " <> BSL.pack decodeErr}
+  NoSuchFunction (namespace, type') -> err400 {errBody = "No such function " <> T.encodeUtf8 (fromStrict namespace) <> T.encodeUtf8 (fromStrict type')}
 
-createApp :: (ToJSON s, FromJSON s) => s -> Map (Text, Text) (PR.ToFunction'InvocationBatchRequest -> Function s ()) -> Application
+createApp :: (FlinkState s) => s -> Map (Text, Text) (PR.ToFunction'InvocationBatchRequest -> Function s ()) -> Application
 createApp initialCtx funcs = serve flinkApi (flinkServer initialCtx funcs)
 
 kafkaRecord :: (Message v) => Text -> Text -> v -> Kafka.KafkaProducerRecord
-kafkaRecord topic k v = 
+kafkaRecord topic k v =
   defMessage
     & Kafka.topic .~ topic
     & Kafka.key .~ k

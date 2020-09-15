@@ -1,6 +1,7 @@
 module Main where
 
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
+import qualified Data.ByteString.Lazy.Char8 as BSL
 import qualified Data.Map as Map
 import Data.ProtoLens (defMessage)
 import Data.Text (Text)
@@ -23,6 +24,10 @@ newtype GreeterState = GreeterState
   { greeterStateCount :: Int
   }
   deriving (Generic, Show, ToJSON, FromJSON)
+
+instance FlinkState GreeterState where
+  decodeState = eitherDecode . BSL.fromStrict
+  encodeState = BSL.toStrict . Data.Aeson.encode
 
 wrapWithEkg :: (HasEndpoint a, HasServer a '[]) => Proxy a -> Server a -> IO Application
 wrapWithEkg api server = do
