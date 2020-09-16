@@ -61,7 +61,7 @@ wrapWithEkg :: (HasEndpoint a, HasServer a '[]) => Proxy a -> Server a -> IO App
 wrapWithEkg api server = do
   store <- newStore
   Metrics.registerGcMetrics store
-  _ <- Monitor.forkServerWith store "localhost" 5000
+  _ <- Monitor.forkServerWith store "0.0.0.0" 5000
   monitorEndpoints' <- monitorEndpoints api store
 
   return $ monitorEndpoints' (serve api server)

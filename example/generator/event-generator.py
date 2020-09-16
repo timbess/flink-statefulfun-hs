@@ -54,7 +54,7 @@ def produce():
         print("Publishing {} {}".format(key, val), flush=True)
         producer.send(topic='names', key=key, value=val)
         producer.flush()
-        time.sleep(delay_seconds)
+        # time.sleep(delay_seconds)
 
 
 def consume():
