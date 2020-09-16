@@ -13,7 +13,6 @@ import Network.Wai.Handler.Warp (run)
 import Network.Wai.Middleware.RequestLogger
 import qualified Proto.Example as EX
 import qualified Proto.Example_Fields as EX
-import Proto.RequestReply (ToFunction'InvocationBatchRequest)
 import Servant
 import Servant.Ekg (HasEndpoint, monitorEndpoints)
 import System.Metrics (newStore)
@@ -29,23 +28,12 @@ instance FlinkState GreeterState where
   decodeState = eitherDecode . BSL.fromStrict
   encodeState = BSL.toStrict . Data.Aeson.encode
 
-wrapWithEkg :: (HasEndpoint a, HasServer a '[]) => Proxy a -> Server a -> IO Application
-wrapWithEkg api server = do
-  store <- newStore
-  Metrics.registerGcMetrics store
-  _ <- Monitor.forkServerWith store "localhost" 5000
-  monitorEndpoints' <- monitorEndpoints api store
-
-  return $ monitorEndpoints' (serve api server)
-
 main :: IO ()
 main = do
   putStrLn "http://localhost:8000/"
-  run 8000 =<< (logStdout <$> wrapWithEkg flinkApi (flinkServer initialCtx functionTable))
-  where
-    initialCtx = GreeterState 0
+  run 8000 =<< (logStdout <$> wrapWithEkg flinkApi (flinkServer functionTable))
 
-greeterEntry :: StatefulFunc GreeterState m => EX.GreeterRequest -> m ()
+greeterEntry :: StatefulFunc () m => EX.GreeterRequest -> m ()
 greeterEntry msg = sendMsg ("greeting", "counter", msg ^. EX.name) msg
 
 counter :: StatefulFunc GreeterState m => EX.GreeterRequest -> m ()
@@ -62,12 +50,18 @@ counter msg = do
       defMessage
         & EX.greeting .~ greeting
 
-functionTable ::
-  Map.Map
-    (Text, Text)
-    (ToFunction'InvocationBatchRequest -> Function GreeterState ())
+functionTable :: FunctionTable
 functionTable =
   Map.fromList
-    [ (("greeting", "greeterEntry"), runInvocations greeterEntry),
-      (("greeting", "counter"), runInvocations counter)
+    [ (("greeting", "greeterEntry"), (encodeState (), makeConcrete greeterEntry)),
+      (("greeting", "counter"), (encodeState $ GreeterState 0, makeConcrete counter))
     ]
+
+wrapWithEkg :: (HasEndpoint a, HasServer a '[]) => Proxy a -> Server a -> IO Application
+wrapWithEkg api server = do
+  store <- newStore
+  Metrics.registerGcMetrics store
+  _ <- Monitor.forkServerWith store "localhost" 5000
+  monitorEndpoints' <- monitorEndpoints api store
+
+  return $ monitorEndpoints' (serve api server)
