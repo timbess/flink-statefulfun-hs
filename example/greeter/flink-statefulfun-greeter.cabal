@@ -27,10 +27,8 @@ executable flink-statefulfun-greeter
   build-tool-depends:  proto-lens-protoc:proto-lens-protoc
   autogen-modules:     Proto.Example Proto.Example_Fields
   other-modules:       Proto.Example Proto.Example_Fields
-  -- causes warning
-  -- about making subprocesses from a static binary
-  -- if you have an issue cause of that.... sorry
-  -- ld-options:          -static -pthread
+  ld-options:          -pthread -static
+  -- ld-options:          -pthread
   ghc-options:         -Wall -Werror -with-rtsopts=-T -threaded -O2
 
   main-is:             Main.hs

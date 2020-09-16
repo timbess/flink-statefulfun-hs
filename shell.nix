@@ -8,15 +8,16 @@ in
   pkgs.mkShell {
     buildInputs = (with pkgs; [
       haskell.compiler.ghc883
-      glibc # glibc.static
-      zlib # zlib.static
-      gmp5 # gmp5.static
+      glibc glibc.static
+      zlib zlib.static
+      gmp5 gmp5.static
       gcc
       protobuf
       wget
+      curl
       git
       libffi
-      # (libffi.overrideAttrs (old: { dontDisableStatic = true; }))
+      (libffi.overrideAttrs (old: { dontDisableStatic = true; }))
     ]) ++ (with pkgs.haskellPackages; [
       hlint
       hoogle

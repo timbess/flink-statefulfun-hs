@@ -50,7 +50,7 @@ services:
       - ./checkpoint-dir:/checkpoint-dir
 
   haskell-worker:
-    command: ./flink-statefulfun-greeter
+    # command: "./flink-statefulfun-greeter +RTS -N8"
     # Uncomment to build locally
     # build:
     #   context: ..

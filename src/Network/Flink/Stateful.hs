@@ -48,6 +48,7 @@ import qualified Proto.RequestReply as PR
 import qualified Proto.RequestReply_Fields as PR
 import Servant
 
+--- | Table of stateful functions `(functionNamespace, functionType) -> (initialState, function)
 type FunctionTable = Map (Text, Text) (ByteString, ByteString -> Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError (FunctionState ByteString)))
 
 data Env = Env
@@ -69,19 +70,73 @@ data FunctionState ctx = FunctionState
 newState :: a -> FunctionState a
 newState initialCtx = FunctionState initialCtx False mempty mempty mempty
 
+-- | Monad stack used for the execution of a Flink stateful function
+-- Don't reference this directly in your code if possible
 newtype Function s a = Function {runFunction :: ExceptT FlinkError (StateT (FunctionState s) (ReaderT Env IO)) a}
   deriving (Monad, Applicative, Functor, MonadState (FunctionState s), MonadError FlinkError, MonadIO, MonadReader Env)
 
--- deriving instance  Monad (StateT (FunctionState ctx) Identity) => Monad Function
-
+-- | Provides functions for Flink state SerDe
 class FlinkState s where
+  -- | decodes Flink state types from strict 'ByteString's
   decodeState :: ByteString -> Either String s
+  -- | encodes Flink state types to strict 'ByteString's
   encodeState :: s -> ByteString
 
 instance FlinkState () where
   decodeState _ = pure ()
   encodeState _ = ""
 
+{-| Used to represent all Flink stateful function capabilities.
+
+Contexts are received from Flink and deserialized into `s`
+all modifications to state are shipped back to Flink at the end of the
+batch to be persisted.
+
+Message passing is also queued up and passed back at the end of the current
+batch.
+
+Example of a stateless function (done by setting `s` to `()`) that adds one
+to a number and puts the protobuf response on Kafka via an egress message:
+
+@
+adder :: StatefulFunc () m => AdderRequest -> m ()
+adder msg = sendEgressMsg ("adder", "added") (kafkaRecord "added" name added)
+  where
+    num = msg ^. AdderRequest.num
+    added = defMessage & AdderResponse.num .~ (num + 1)
+@
+
+Example of a stateful function:
+
+@
+newtype GreeterState = GreeterState
+  { greeterStateCount :: Int
+  }
+  deriving (Generic, Show, ToJSON, FromJSON)
+
+instance FlinkState GreeterState where
+  decodeState = eitherDecode . BSL.fromStrict
+  encodeState = BSL.toStrict . Data.Aeson.encode
+
+counter :: StatefulFunc GreeterState m => EX.GreeterRequest -> m ()
+counter msg = do
+  newCount \<\- (+ 1) \<$> insideCtx greeterStateCount
+  let respMsg = "Saw " <> T.unpack name <> " " <> show newCount <> " time(s)"
+
+  sendEgressMsg ("greeting", "greets") (kafkaRecord "greets" name $ response (T.pack respMsg))
+  modifyCtx (\old -> old {greeterStateCount = newCount})
+  where
+    name = msg ^. EX.name
+    response :: Text -> EX.GreeterResponse
+    response greeting =
+      defMessage
+        & EX.greeting .~ greeting
+@
+
+This will respond to each event by counting how many times it has been called for the name it was passed.
+The final state is taken and sent back to Flink. Failures of any kind will cause state to rollback to
+previous values seamlessly without double counting.
+-}
 class MonadIO m => StatefulFunc s m | m -> s where
   -- Internal
   setInitialCtx :: s -> m ()
@@ -175,6 +230,9 @@ data FlinkError
 invoke :: (FlinkState s, StatefulFunc s m, MonadError FlinkError m, Message a, MonadReader Env m) => (a -> m b) -> Any -> m b
 invoke f input = f =<< liftEither (mapLeft ProtoUnpackError $ Any.unpack input)
 
+-- | Takes a function taking an abstract state/message type and converts it to take concrete 'ByteString's
+-- This allows each function in the 'FunctionTable' to take its own individual type of state and just expose
+-- a function accepting 'ByteString' to the library code.
 makeConcrete :: (FlinkState s, Message a) => (a -> Function s ()) -> ByteString -> Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError (FunctionState ByteString))
 makeConcrete func initialContext env invocationBatch = runExceptT $ do
   deserializedContext <- liftEither $ mapLeft StateDecodeError $ decodeState initialContext
@@ -248,6 +306,7 @@ flinkErrToServant err = case err of
   StateDecodeError decodeErr -> err400 {errBody = "Invalid JSON " <> BSL.pack decodeErr}
   NoSuchFunction (namespace, type') -> err400 {errBody = "No such function " <> T.encodeUtf8 (fromStrict namespace) <> T.encodeUtf8 (fromStrict type')}
 
+-- | Takes a `topic`, `key`, and protobuf `value` to construct 'KafkaProducerRecord's for egress
 kafkaRecord :: (Message v) => Text -> Text -> v -> Kafka.KafkaProducerRecord
 kafkaRecord topic k v =
   defMessage
