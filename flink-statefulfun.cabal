@@ -26,6 +26,7 @@ custom-setup
 library
   ghc-options:         -Wall -Werror
   build-tool-depends:  proto-lens-protoc:proto-lens-protoc
+  pkgconfig-depends:   protobuf
   hs-source-dirs:      src
   autogen-modules:     Proto.RequestReply Proto.RequestReply_Fields
                        Proto.Kafka Proto.Kafka_Fields
