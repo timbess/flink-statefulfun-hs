@@ -19,6 +19,7 @@ docker-compose logs -f event-generator
 ```bash
 cachix use iohk
 cachix use static-haskell-nix
+cachix use flink-statefulfun
 ```
 4. Compile
 ```bash
