@@ -10,6 +10,7 @@ description:
     Checkout the [README for examples](https://github.com/tdbgamer/flink-statefulfun-hs).
 license:             MPL-2.0
 license-file:        LICENSE
+category:            Flink, Web
 author:              Timothy Bess
 maintainer:          tdbgamer@gmail.com
 
