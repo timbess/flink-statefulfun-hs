@@ -9,6 +9,7 @@ import qualified Data.Text as T
 import GHC.Generics
 import Lens.Family2
 import Network.Flink.Stateful
+import Network.Flink.Kafka
 import Network.Wai.Handler.Warp (run)
 import Network.Wai.Middleware.RequestLogger
 import qualified Proto.Example as EX

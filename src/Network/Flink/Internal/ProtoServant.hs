@@ -1,4 +1,4 @@
-module Network.Flink.ProtoServant where
+module Network.Flink.Internal.ProtoServant where
 
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.List.NonEmpty as NE
