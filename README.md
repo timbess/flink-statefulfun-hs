@@ -21,7 +21,8 @@ cachix use iohk
 cachix use static-haskell-nix
 cachix use flink-statefulfun
 ```
-4. Compile
+4. Compile inside a nix shell
 ```bash
+nix-shell
 cabal build
 ```
