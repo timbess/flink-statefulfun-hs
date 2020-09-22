@@ -280,9 +280,11 @@ type FlinkApi =
 flinkApi :: Proxy FlinkApi
 flinkApi = Proxy
 
+-- | Takes function table and creates a wai 'Application' to serve flink requests
 createApp :: FunctionTable -> Application
 createApp funcs = serve flinkApi (flinkServer funcs)
 
+-- | Takes function table and creates a servant 'Server' to serve flink requests
 flinkServer :: FunctionTable -> Server FlinkApi
 flinkServer functions toFunction = do
   batch <- getBatch toFunction
