@@ -13,18 +13,23 @@ module Network.Flink.Internal.Stateful
     flinkServer,
     flinkApi,
     Function (..),
-    FlinkState (..),
+    Serde (..),
     FunctionState (..),
     FlinkError (..),
     FunctionTable,
     Env (..),
-    newState
+    newState,
+    MessageSerde (..),
+    JsonSerde (..),
+    jsonState,
+    protoState,
   )
 where
 
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State (MonadState, StateT (..), gets, modify)
+import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy.Char8 as BSL
 import Data.Either.Combinators (mapLeft)
@@ -32,9 +37,10 @@ import Data.Foldable (Foldable (toList))
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (listToMaybe)
-import Data.ProtoLens (Message, defMessage)
+import Data.ProtoLens (Message, defMessage, encodeMessage)
 import Data.ProtoLens.Any (UnpackError)
 import qualified Data.ProtoLens.Any as Any
+import Data.ProtoLens.Encoding (decodeMessage)
 import Data.ProtoLens.Prism
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
@@ -44,6 +50,7 @@ import qualified Data.Text.Lazy.Encoding as T
 import Lens.Family2
 import Network.Flink.Internal.ProtoServant (Proto)
 import Proto.Google.Protobuf.Any (Any)
+import qualified Proto.Google.Protobuf.Any_Fields as Any
 import Proto.RequestReply (FromFunction, ToFunction)
 import qualified Proto.RequestReply as PR
 import qualified Proto.RequestReply_Fields as PR
@@ -77,67 +84,83 @@ newtype Function s a = Function {runFunction :: ExceptT FlinkError (StateT (Func
   deriving (Monad, Applicative, Functor, MonadState (FunctionState s), MonadError FlinkError, MonadIO, MonadReader Env)
 
 -- | Provides functions for Flink state SerDe
-class FlinkState s where
-  -- | decodes Flink state types from strict 'ByteString's
-  decodeState :: ByteString -> Either String s
-  -- | encodes Flink state types to strict 'ByteString's
-  encodeState :: s -> ByteString
+class Serde a where
+  -- | decodes types from strict 'ByteString's
+  deserialize :: ByteString -> Either String a
 
-instance FlinkState () where
-  decodeState _ = pure ()
-  encodeState _ = ""
+  -- | encodes types to strict 'ByteString's
+  serialize :: a -> ByteString
 
-{-| Used to represent all Flink stateful function capabilities.
+newtype MessageSerde a = MessageSerde {getMessage :: a}
+  deriving (Functor)
 
-Contexts are received from Flink and deserialized into `s`
-all modifications to state are shipped back to Flink at the end of the
-batch to be persisted.
+instance Message a => Serde (MessageSerde a) where
+  deserialize a = MessageSerde <$> decodeMessage a
+  serialize (MessageSerde a) = encodeMessage a
 
-Message passing is also queued up and passed back at the end of the current
-batch.
+type Json a = (FromJSON a, ToJSON a)
 
-Example of a stateless function (done by setting `s` to `()`) that adds one
-to a number and puts the protobuf response on Kafka via an egress message:
+newtype JsonSerde a = JsonSerde {getJson :: a}
+  deriving (Functor)
 
-@
-adder :: StatefulFunc () m => AdderRequest -> m ()
-adder msg = sendEgressMsg ("adder", "added") (kafkaRecord "added" name added)
-  where
-    num = msg ^. AdderRequest.num
-    added = defMessage & AdderResponse.num .~ (num + 1)
-@
+instance Json a => Serde (JsonSerde a) where
+  deserialize a = JsonSerde <$> eitherDecode (BSL.fromStrict a)
+  serialize (JsonSerde a) = BSL.toStrict $ encode a
 
-Example of a stateful function:
+instance Serde () where
+  deserialize _ = pure ()
+  serialize _ = ""
 
-@
-newtype GreeterState = GreeterState
-  { greeterStateCount :: Int
-  }
-  deriving (Generic, Show, ToJSON, FromJSON)
-
-instance FlinkState GreeterState where
-  decodeState = eitherDecode . BSL.fromStrict
-  encodeState = BSL.toStrict . Data.Aeson.encode
-
-counter :: StatefulFunc GreeterState m => EX.GreeterRequest -> m ()
-counter msg = do
-  newCount \<\- (+ 1) \<$> insideCtx greeterStateCount
-  let respMsg = "Saw " <> T.unpack name <> " " <> show newCount <> " time(s)"
-
-  sendEgressMsg ("greeting", "greets") (kafkaRecord "greets" name $ response (T.pack respMsg))
-  modifyCtx (\old -> old {greeterStateCount = newCount})
-  where
-    name = msg ^. EX.name
-    response :: Text -> EX.GreeterResponse
-    response greeting =
-      defMessage
-        & EX.greeting .~ greeting
-@
-
-This will respond to each event by counting how many times it has been called for the name it was passed.
-The final state is taken and sent back to Flink. Failures of any kind will cause state to rollback to
-previous values seamlessly without double counting.
--}
+-- | Used to represent all Flink stateful function capabilities.
+--
+-- Contexts are received from Flink and deserialized into `s`
+-- all modifications to state are shipped back to Flink at the end of the
+-- batch to be persisted.
+--
+-- Message passing is also queued up and passed back at the end of the current
+-- batch.
+--
+-- Example of a stateless function (done by setting `s` to `()`) that adds one
+-- to a number and puts the protobuf response on Kafka via an egress message:
+--
+-- @
+-- adder :: StatefulFunc () m => AdderRequest -> m ()
+-- adder msg = sendEgressMsg ("adder", "added") (kafkaRecord "added" name added)
+--  where
+--    num = msg ^. AdderRequest.num
+--    added = defMessage & AdderResponse.num .~ (num + 1)
+-- @
+--
+-- Example of a stateful function:
+--
+-- @
+-- newtype GreeterState = GreeterState
+--  { greeterStateCount :: Int
+--  }
+--  deriving (Generic, Show, ToJSON, FromJSON)
+--
+-- instance Serde GreeterState where
+--  deserialize = eitherDecode . BSL.fromStrict
+--  serialize = BSL.toStrict . Data.Aeson.encode
+--
+-- counter :: StatefulFunc GreeterState m => EX.GreeterRequest -> m ()
+-- counter msg = do
+--  newCount \<\- (+ 1) \<$> insideCtx greeterStateCount
+--  let respMsg = "Saw " <> T.unpack name <> " " <> show newCount <> " time(s)"
+--
+--  sendEgressMsg ("greeting", "greets") (kafkaRecord "greets" name $ response (T.pack respMsg))
+--  modifyCtx (\old -> old {greeterStateCount = newCount})
+--  where
+--    name = msg ^. EX.name
+--    response :: Text -> EX.GreeterResponse
+--    response greeting =
+--      defMessage
+--        & EX.greeting .~ greeting
+-- @
+--
+-- This will respond to each event by counting how many times it has been called for the name it was passed.
+-- The final state is taken and sent back to Flink. Failures of any kind will cause state to rollback to
+-- previous values seamlessly without double counting.
 class MonadIO m => StatefulFunc s m | m -> s where
   -- Internal
   setInitialCtx :: s -> m ()
@@ -171,7 +194,7 @@ class MonadIO m => StatefulFunc s m | m -> s where
     a ->
     m ()
 
-instance (FlinkState s) => StatefulFunc s (Function s) where
+instance StatefulFunc s (Function s) where
   setInitialCtx ctx = modify (\old -> old {functionStateCtx = ctx})
 
   insideCtx func = func <$> getCtx
@@ -222,24 +245,38 @@ instance (FlinkState s) => StatefulFunc s (Function s) where
 
 data FlinkError
   = MissingInvocationBatch
-  | ProtoUnpackError UnpackError
   | ProtoDeserializeError String
   | StateDecodeError String
+  | MessageDecodeError String
   | NoSuchFunction (Text, Text)
   deriving (Show, Eq)
 
-invoke :: (FlinkState s, StatefulFunc s m, MonadError FlinkError m, Message a, MonadReader Env m) => (a -> m b) -> Any -> m b
-invoke f input = f =<< liftEither (mapLeft ProtoUnpackError $ Any.unpack input)
+invoke :: (Serde s, StatefulFunc s m, MonadError FlinkError m, Serde a, MonadReader Env m) => (a -> m b) -> Any -> m b
+invoke f input = f =<< liftEither (mapLeft MessageDecodeError $ deserialize (input ^. Any.value))
+
+-- | Convenience function for wrapping state in newtype for serialization
+jsonState :: (Json s, Serde a) => (a -> Function s ()) -> a -> Function (JsonSerde s) ()
+jsonState f a = jsonWrapper
+  where
+    jsonWrapper = Function (ExceptT (StateT (\s -> ReaderT (\env -> (fmap . fmap) JsonSerde <$> runner (f a) env (getJson <$> s)))))
+    runner res env state = runReaderT (runStateT (runExceptT $ runFunction res) state) env
+
+-- | Convenience function for wrapping state in newtype for serialization
+protoState :: (Message s, Serde a) => (a -> Function s ()) -> a -> Function (MessageSerde s) ()
+protoState f a = protoWrapper
+  where
+    protoWrapper = Function (ExceptT (StateT (\s -> ReaderT (\env -> (fmap . fmap) MessageSerde <$> runner (f a) env (getMessage <$> s)))))
+    runner res env state = runReaderT (runStateT (runExceptT $ runFunction res) state) env
 
 -- | Takes a function taking an abstract state/message type and converts it to take concrete 'ByteString's
 -- This allows each function in the 'FunctionTable' to take its own individual type of state and just expose
 -- a function accepting 'ByteString' to the library code.
-makeConcrete :: (FlinkState s, Message a) => (a -> Function s ()) -> ByteString -> Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError (FunctionState ByteString))
+makeConcrete :: (Serde s, Serde a) => (a -> Function s ()) -> ByteString -> Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError (FunctionState ByteString))
 makeConcrete func initialContext env invocationBatch = runExceptT $ do
-  deserializedContext <- liftEither $ mapLeft StateDecodeError $ decodeState initialContext
+  deserializedContext <- liftEither $ mapLeft StateDecodeError $ deserialize initialContext
   (err, finalState) <- liftIO $ runner (newState deserializedContext)
   liftEither err
-  return $ encodeState <$> finalState
+  return $ serialize <$> finalState
   where
     runner state = runReaderT (runStateT (runExceptT $ runFunction runWithCtx) state) env
     runWithCtx = do
@@ -253,7 +290,7 @@ makeConcrete func initialContext env invocationBatch = runExceptT $ do
     getInitialCtx def pv = handleEmptyState def $ (^. PR.stateValue) <$> pv
     handleEmptyState def state' = case state' of
       Just "" -> return def
-      Just other -> mapLeft StateDecodeError $ decodeState other
+      Just other -> mapLeft StateDecodeError $ deserialize other
       Nothing -> return def
 
 createFlinkResp :: FunctionState ByteString -> FromFunction
@@ -304,7 +341,7 @@ flinkServer functions toFunction = do
 flinkErrToServant :: FlinkError -> ServerError
 flinkErrToServant err = case err of
   MissingInvocationBatch -> err400 {errBody = "Invocation batch missing"}
-  ProtoUnpackError unpackErr -> err400 {errBody = "Failed to unpack protobuf Any " <> BSL.pack (show unpackErr)}
   ProtoDeserializeError protoErr -> err400 {errBody = "Could not deserialize protobuf " <> BSL.pack protoErr}
   StateDecodeError decodeErr -> err400 {errBody = "Invalid JSON " <> BSL.pack decodeErr}
+  MessageDecodeError msg -> err400 {errBody = "Failed to decode message " <> BSL.pack msg }
   NoSuchFunction (namespace, type') -> err400 {errBody = "No such function " <> T.encodeUtf8 (fromStrict namespace) <> T.encodeUtf8 (fromStrict type')}
