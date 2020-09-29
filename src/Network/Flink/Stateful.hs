@@ -17,7 +17,10 @@ module Network.Flink.Stateful
         modifyCtx,
         sendMsg,
         sendMsgDelay,
-        sendEgressMsg
+        sendEgressMsg,
+        sendByteMsg,
+        sendByteMsgDelay,
+        sendEgressByteMsg
       ),
     makeConcrete,
     createApp,
@@ -26,7 +29,7 @@ module Network.Flink.Stateful
     Serde (..),
     FunctionTable,
     JsonSerde (..),
-    MessageSerde (..),
+    ProtoSerde (..),
     jsonState,
     protoState,
   )

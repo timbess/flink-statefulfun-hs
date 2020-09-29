@@ -29,11 +29,11 @@ main = do
   putStrLn "http://localhost:8000/"
   run 8000 =<< (logStdout <$> wrapWithEkg flinkApi (flinkServer functionTable))
 
-greeterEntry :: StatefulFunc () m => MessageSerde EX.GreeterRequest -> m ()
-greeterEntry (MessageSerde msg) = sendMsg ("greeting", "counter", msg ^. EX.name) msg
+greeterEntry :: StatefulFunc () m => ProtoSerde EX.GreeterRequest -> m ()
+greeterEntry (ProtoSerde msg) = sendMsg ("greeting", "counter", msg ^. EX.name) msg
 
-counter :: StatefulFunc GreeterState m => MessageSerde EX.GreeterRequest -> m ()
-counter (MessageSerde msg) = do
+counter :: StatefulFunc GreeterState m => ProtoSerde EX.GreeterRequest -> m ()
+counter (ProtoSerde msg) = do
   newCount <- (+ 1) <$> insideCtx greeterStateCount
   let respMsg = "Saw " <> T.unpack name <> " " <> show newCount <> " time(s)"
 
@@ -43,14 +43,14 @@ counter (MessageSerde msg) = do
     name = msg ^. EX.name
     response :: Text -> EX.GreeterResponse
     response greeting =
-        defMessage
-          & EX.greeting .~ greeting
+      defMessage
+        & EX.greeting .~ greeting
 
 functionTable :: FunctionTable
 functionTable =
   Map.fromList
-    [ (("greeting", "greeterEntry"), (serialize (), makeConcrete greeterEntry)),
-      (("greeting", "counter"), (serialize . JsonSerde $ GreeterState 0, makeConcrete (jsonState counter)))
+    [ (("greeting", "greeterEntry"), (serializeBytes  (), makeConcrete greeterEntry)),
+      (("greeting", "counter"), (serializeBytes  . JsonSerde $ GreeterState 0, makeConcrete (jsonState counter)))
     ]
 
 wrapWithEkg :: (HasEndpoint a, HasServer a '[]) => Proxy a -> Server a -> IO Application

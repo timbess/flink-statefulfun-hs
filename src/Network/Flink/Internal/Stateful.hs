@@ -6,7 +6,10 @@ module Network.Flink.Internal.Stateful
         modifyCtx,
         sendMsg,
         sendMsgDelay,
-        sendEgressMsg
+        sendEgressMsg,
+        sendByteMsg,
+        sendByteMsgDelay,
+        sendEgressByteMsg
       ),
     makeConcrete,
     createApp,
@@ -19,7 +22,7 @@ module Network.Flink.Internal.Stateful
     FunctionTable,
     Env (..),
     newState,
-    MessageSerde (..),
+    ProtoSerde (..),
     JsonSerde (..),
     jsonState,
     protoState,
@@ -82,20 +85,20 @@ newState initialCtx = FunctionState initialCtx False mempty mempty mempty
 newtype Function s a = Function {runFunction :: ExceptT FlinkError (StateT (FunctionState s) (ReaderT Env IO)) a}
   deriving (Monad, Applicative, Functor, MonadState (FunctionState s), MonadError FlinkError, MonadIO, MonadReader Env)
 
--- | Provides functions for Flink state SerDe
 class Serde a where
   -- | decodes types from strict 'ByteString's
-  deserialize :: ByteString -> Either String a
+  deserializeBytes :: ByteString -> Either String a
 
   -- | encodes types to strict 'ByteString's
-  serialize :: a -> ByteString
+  serializeBytes :: a -> ByteString
 
-newtype MessageSerde a = MessageSerde {getMessage :: a}
+-- | Provides functions for Flink state SerDe
+newtype ProtoSerde a = ProtoSerde {getMessage :: a}
   deriving (Functor)
 
-instance Message a => Serde (MessageSerde a) where
-  deserialize a = MessageSerde <$> decodeMessage a
-  serialize (MessageSerde a) = encodeMessage a
+instance Message a => Serde (ProtoSerde a) where
+  deserializeBytes a = ProtoSerde <$> decodeMessage a
+  serializeBytes (ProtoSerde a) = encodeMessage a
 
 type Json a = (FromJSON a, ToJSON a)
 
@@ -103,16 +106,24 @@ newtype JsonSerde a = JsonSerde {getJson :: a}
   deriving (Functor)
 
 instance Json a => Serde (JsonSerde a) where
-  deserialize a = JsonSerde <$> eitherDecode (BSL.fromStrict a)
-  serialize (JsonSerde a) = BSL.toStrict $ encode a
+  deserializeBytes a = JsonSerde <$> eitherDecode (BSL.fromStrict a)
+  serializeBytes (JsonSerde a) = BSL.toStrict $ encode a
 
 instance Serde () where
-  deserialize _ = pure ()
-  serialize _ = ""
+  deserializeBytes _ = pure ()
+  serializeBytes _ = ""
+
+instance Serde ByteString where
+  deserializeBytes = pure
+  serializeBytes = id
+
+instance Serde BSL.ByteString where
+  deserializeBytes = pure . BSL.fromStrict
+  serializeBytes = BSL.toStrict
 
 -- | Used to represent all Flink stateful function capabilities.
 --
--- Contexts are received from Flink and deserialized into `s`
+-- Contexts are received from Flink and deserializeBytesd into `s`
 -- all modifications to state are shipped back to Flink at the end of the
 -- batch to be persisted.
 --
@@ -123,8 +134,8 @@ instance Serde () where
 -- to a number and puts the protobuf response on Kafka via an egress message:
 --
 -- @
--- adder :: StatefulFunc () m => AdderRequest -> m ()
--- adder msg = sendEgressMsg ("adder", "added") (kafkaRecord "added" name added)
+-- adder :: StatefulFunc () m => ProtoSerde AdderRequest -> m ()
+-- adder msg = sendEgressMsg ("adder", "added") (kafkaRecord "added" name $ encodeMessage added)
 --  where
 --    num = msg ^. AdderRequest.num
 --    added = defMessage & AdderResponse.num .~ (num + 1)
@@ -137,10 +148,6 @@ instance Serde () where
 --  { greeterStateCount :: Int
 --  }
 --  deriving (Generic, Show, ToJSON, FromJSON)
---
--- instance Serde GreeterState where
---  deserialize = eitherDecode . BSL.fromStrict
---  serialize = BSL.toStrict . Data.Aeson.encode
 --
 -- counter :: StatefulFunc GreeterState m => EX.GreeterRequest -> m ()
 -- counter msg = do
@@ -193,6 +200,30 @@ class MonadIO m => StatefulFunc s m | m -> s where
     a ->
     m ()
 
+  sendByteMsg ::
+    Serde a =>
+    -- | Function address (namespace, type, id)
+    (Text, Text, Text) ->
+    -- | message to send
+    a ->
+    m ()
+  sendByteMsgDelay ::
+    Serde a =>
+    -- | Function address (namespace, type, id)
+    (Text, Text, Text) ->
+    -- | delay before message send
+    Int ->
+    -- | message to send
+    a ->
+    m ()
+  sendEgressByteMsg ::
+    Serde a =>
+    -- | egress address (namespace, type)
+    (Text, Text) ->
+    -- | message to send (should be a Kafka or Kinesis protobuf record)
+    a ->
+    m ()
+
 instance StatefulFunc s (Function s) where
   setInitialCtx ctx = modify (\old -> old {functionStateCtx = ctx})
 
@@ -241,30 +272,74 @@ instance StatefulFunc s (Function s) where
           & PR.egressNamespace .~ namespace
           & PR.egressType .~ egressType
           & PR.argument .~ Any.pack msg
+  sendByteMsg (namespace, funcType, id') msg = do
+    invocations <- gets functionStateInvocations
+    modify (\old -> old {functionStateInvocations = invocations Seq.:|> invocation})
+    where
+      argument :: Any
+      argument = defMessage & Any.value .~ serializeBytes msg
+      target :: PR.Address
+      target =
+        defMessage
+          & PR.namespace .~ namespace
+          & PR.type' .~ funcType
+          & PR.id .~ id'
+      invocation :: PR.FromFunction'Invocation
+      invocation =
+        defMessage
+          & PR.target .~ target
+          & PR.argument .~ argument
+  sendByteMsgDelay (namespace, funcType, id') delay msg = do
+    invocations <- gets functionStateDelayedInvocations
+    modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation})
+    where
+      argument :: Any
+      argument = defMessage & Any.value .~ serializeBytes msg
+      target :: PR.Address
+      target =
+        defMessage
+          & PR.namespace .~ namespace
+          & PR.type' .~ funcType
+          & PR.id .~ id'
+      invocation :: PR.FromFunction'DelayedInvocation
+      invocation =
+        defMessage
+          & PR.delayInMs .~ fromIntegral delay
+          & PR.target .~ target
+          & PR.argument .~ argument
+  sendEgressByteMsg (namespace, egressType) msg = do
+    egresses <- gets functionStateEgressMessages
+    modify (\old -> old {functionStateEgressMessages = egresses Seq.:|> egressMsg})
+    where
+      argument :: Any
+      argument = defMessage & Any.value .~ serializeBytes msg
+      egressMsg :: PR.FromFunction'EgressMessage
+      egressMsg =
+        defMessage
+          & PR.egressNamespace .~ namespace
+          & PR.egressType .~ egressType
+          & PR.argument .~ argument
 
 data FlinkError
   = MissingInvocationBatch
-  | ProtoDeserializeError String
+  | ProtodeserializeBytesError String
   | StateDecodeError String
   | MessageDecodeError String
   | NoSuchFunction (Text, Text)
   deriving (Show, Eq)
 
-invoke :: (Serde s, StatefulFunc s m, MonadError FlinkError m, Serde a, MonadReader Env m) => (a -> m b) -> Any -> m b
-invoke f input = f =<< liftEither (mapLeft MessageDecodeError $ deserialize (input ^. Any.value))
-
--- | Convenience function for wrapping state in newtype for serialization
+-- | Convenience function for wrapping state in newtype for JSON serialization
 jsonState :: (Json s, Serde a) => (a -> Function s ()) -> a -> Function (JsonSerde s) ()
 jsonState f a = jsonWrapper
   where
     jsonWrapper = Function (ExceptT (StateT (\s -> ReaderT (\env -> (fmap . fmap) JsonSerde <$> runner (f a) env (getJson <$> s)))))
     runner res env state = runReaderT (runStateT (runExceptT $ runFunction res) state) env
 
--- | Convenience function for wrapping state in newtype for serialization
-protoState :: (Message s, Serde a) => (a -> Function s ()) -> a -> Function (MessageSerde s) ()
+-- | Convenience function for wrapping state in newtype for Protobuf serialization
+protoState :: (Message s, Serde a) => (a -> Function s ()) -> a -> Function (ProtoSerde s) ()
 protoState f a = protoWrapper
   where
-    protoWrapper = Function (ExceptT (StateT (\s -> ReaderT (\env -> (fmap . fmap) MessageSerde <$> runner (f a) env (getMessage <$> s)))))
+    protoWrapper = Function (ExceptT (StateT (\s -> ReaderT (\env -> (fmap . fmap) ProtoSerde <$> runner (f a) env (getMessage <$> s)))))
     runner res env state = runReaderT (runStateT (runExceptT $ runFunction res) state) env
 
 -- | Takes a function taking an abstract state/message type and converts it to take concrete 'ByteString's
@@ -272,10 +347,10 @@ protoState f a = protoWrapper
 -- a function accepting 'ByteString' to the library code.
 makeConcrete :: (Serde s, Serde a) => (a -> Function s ()) -> ByteString -> Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError (FunctionState ByteString))
 makeConcrete func initialContext env invocationBatch = runExceptT $ do
-  deserializedContext <- liftEither $ mapLeft StateDecodeError $ deserialize initialContext
-  (err, finalState) <- liftIO $ runner (newState deserializedContext)
+  deserializeBytesdContext <- liftEither $ mapLeft StateDecodeError $ deserializeBytes initialContext
+  (err, finalState) <- liftIO $ runner (newState deserializeBytesdContext)
   liftEither err
-  return $ serialize <$> finalState
+  return $ serializeBytes <$> finalState
   where
     runner state = runReaderT (runStateT (runExceptT $ runFunction runWithCtx) state) env
     runWithCtx = do
@@ -289,8 +364,11 @@ makeConcrete func initialContext env invocationBatch = runExceptT $ do
     getInitialCtx def pv = handleEmptyState def $ (^. PR.stateValue) <$> pv
     handleEmptyState def state' = case state' of
       Just "" -> return def
-      Just other -> mapLeft StateDecodeError $ deserialize other
+      Just other -> mapLeft StateDecodeError $ deserializeBytes other
       Nothing -> return def
+
+invoke :: (Serde s, StatefulFunc s m, MonadError FlinkError m, Serde a, MonadReader Env m) => (a -> m b) -> Any -> m b
+invoke f input = f =<< liftEither (mapLeft MessageDecodeError $ deserializeBytes (input ^. Any.value))
 
 createFlinkResp :: FunctionState ByteString -> FromFunction
 createFlinkResp (FunctionState state mutated invocations delayedInvocations egresses) =
@@ -340,7 +418,7 @@ flinkServer functions toFunction = do
 flinkErrToServant :: FlinkError -> ServerError
 flinkErrToServant err = case err of
   MissingInvocationBatch -> err400 {errBody = "Invocation batch missing"}
-  ProtoDeserializeError protoErr -> err400 {errBody = "Could not deserialize protobuf " <> BSL.pack protoErr}
+  ProtodeserializeBytesError protoErr -> err400 {errBody = "Could not deserializeBytes protobuf " <> BSL.pack protoErr}
   StateDecodeError decodeErr -> err400 {errBody = "Invalid JSON " <> BSL.pack decodeErr}
-  MessageDecodeError msg -> err400 {errBody = "Failed to decode message " <> BSL.pack msg }
+  MessageDecodeError msg -> err400 {errBody = "Failed to decode message " <> BSL.pack msg}
   NoSuchFunction (namespace, type') -> err400 {errBody = "No such function " <> T.encodeUtf8 (fromStrict namespace) <> T.encodeUtf8 (fromStrict type')}
