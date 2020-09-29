@@ -117,8 +117,8 @@ main = do
 functionTable :: FunctionTable
 functionTable =
   Map.fromList
-    [ (("printing", "printer"), (serializeBytes  (), makeConcrete printer)),
-      (("greeting", "counter"), (serializeBytes  . JsonSerde $ GreeterState 0, makeConcrete (jsonState counter)))
+    [ (("printing", "printer"), (serializeBytes (), makeConcrete printer)),
+      (("greeting", "counter"), (serializeBytes . JsonSerde $ GreeterState 0, makeConcrete (jsonState counter)))
     ]
 ```
 
