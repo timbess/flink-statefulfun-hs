@@ -38,7 +38,6 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (listToMaybe)
 import Data.ProtoLens (Message, defMessage, encodeMessage)
-import Data.ProtoLens.Any (UnpackError)
 import qualified Data.ProtoLens.Any as Any
 import Data.ProtoLens.Encoding (decodeMessage)
 import Data.ProtoLens.Prism
