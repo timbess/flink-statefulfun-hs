@@ -61,8 +61,9 @@ type as an argument and simply prints it. `Statefulfunc` makes this a Flink
 stateful function with a state type of `()` (meaning it requires no state).
 
 Wrapping the `GreeterResponse` in `ProtoSerde` uses the [proto-lens](https://github.com/google/proto-lens)
-library to deserializeBytes the incoming messages for this function. To use Json it can
-also be wrapped in `JsonSerde` instead.
+library to deserialize the incoming messages for this function. To use JSON it can
+also be wrapped in `JsonSerde` instead. Don't forget that the sender will have to use
+`sendByteMsg` instead of `sendMsg` to send JSON to this function if you choose to do so.
 
 ### Declaring a function with state
 
