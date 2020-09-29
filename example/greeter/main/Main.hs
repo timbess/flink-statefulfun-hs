@@ -22,7 +22,10 @@ import qualified System.Remote.Monitoring as Monitor
 newtype GreeterState = GreeterState
   { greeterStateCount :: Int
   }
-  deriving (Generic, Show, ToJSON, FromJSON)
+  deriving (Generic, Show)
+
+instance ToJSON GreeterState
+instance FromJSON GreeterState
 
 main :: IO ()
 main = do

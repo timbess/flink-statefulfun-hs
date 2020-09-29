@@ -76,7 +76,10 @@ import GHC.Generics
 newtype GreeterState = GreeterState
   { greeterStateCount :: Int
   }
-  deriving (Generic, Show, ToJSON, FromJSON)
+  deriving (Generic, Show)
+
+instance ToJSON GreeterState
+instance FromJSON GreeterState
 
 counter :: StatefulFunc GreeterState m => ProtoSerde EX.GreeterRequest -> m ()
 counter (ProtoSerde msg) = do

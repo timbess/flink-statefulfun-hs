@@ -8,8 +8,7 @@ module Network.Flink.Internal.Stateful
         sendMsgDelay,
         sendEgressMsg,
         sendByteMsg,
-        sendByteMsgDelay,
-        sendEgressByteMsg
+        sendByteMsgDelay
       ),
     makeConcrete,
     createApp,
@@ -178,13 +177,6 @@ class MonadIO m => StatefulFunc s m | m -> s where
     -- | message to send
     a ->
     m ()
-  sendEgressByteMsg ::
-    Serde a =>
-    -- | egress address (namespace, type)
-    (Text, Text) ->
-    -- | message to send (should be a Kafka or Kinesis protobuf record)
-    a ->
-    m ()
 
 instance StatefulFunc s (Function s) where
   setInitialCtx ctx = modify (\old -> old {functionStateCtx = ctx})
@@ -268,18 +260,6 @@ instance StatefulFunc s (Function s) where
         defMessage
           & PR.delayInMs .~ fromIntegral delay
           & PR.target .~ target
-          & PR.argument .~ argument
-  sendEgressByteMsg (namespace, egressType) msg = do
-    egresses <- gets functionStateEgressMessages
-    modify (\old -> old {functionStateEgressMessages = egresses Seq.:|> egressMsg})
-    where
-      argument :: Any
-      argument = defMessage & Any.value .~ serializeBytes msg
-      egressMsg :: PR.FromFunction'EgressMessage
-      egressMsg =
-        defMessage
-          & PR.egressNamespace .~ namespace
-          & PR.egressType .~ egressType
           & PR.argument .~ argument
 
 data FlinkError

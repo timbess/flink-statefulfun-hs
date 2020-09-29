@@ -19,8 +19,7 @@ module Network.Flink.Stateful
         sendMsgDelay,
         sendEgressMsg,
         sendByteMsg,
-        sendByteMsgDelay,
-        sendEgressByteMsg
+        sendByteMsgDelay
       ),
     makeConcrete,
     createApp,
