@@ -18,7 +18,6 @@ in
       muslpkgs.haskell.compiler.ghc882
       muslpkgs.zlib.static
       (muslpkgs.gmp6.override { withStatic = true; })
-      pkgconfig
       gcc
       protobuf
       wget
