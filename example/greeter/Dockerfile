@@ -13,11 +13,12 @@ COPY shell.nix /app/example/greeter
 RUN nix-shell --run true
 
 COPY . /app
-RUN rm -rf example
+# TODO: Stupid docker doesn't cache this.
+# RUN rm -rf example
 
-RUN nix-shell --run 'cd /app && cabal build'
+# RUN nix-shell --run 'cd /app && cabal build'
 
-COPY example /app/example
+# COPY example /app/example
 
 RUN nix-shell --run 'cabal install --installdir=.'
 RUN mv `readlink flink-statefulfun-greeter` .
