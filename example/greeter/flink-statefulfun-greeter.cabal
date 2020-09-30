@@ -29,7 +29,7 @@ executable flink-statefulfun-greeter
   other-modules:       Proto.Example Proto.Example_Fields
   ld-options:          -pthread -static
   -- ld-options:          -pthread
-  ghc-options:         -Wall -Werror -with-rtsopts=-T -threaded -O2
+  ghc-options:         -Wall -with-rtsopts=-T -threaded -O2
 
   main-is:             Main.hs
   hs-source-dirs:      main

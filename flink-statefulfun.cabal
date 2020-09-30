@@ -1,7 +1,7 @@
 cabal-version:       2.4
 
 name:                flink-statefulfun
-version:             0.2.0.0
+version:             0.3.0.0
 synopsis:            Flink stateful functions SDK
 description:
     Typeclasses for serving Flink stateful functions
@@ -46,6 +46,7 @@ library
                        Proto.RequestReply Proto.RequestReply_Fields
                        Proto.Kafka Proto.Kafka_Fields
   build-depends:       base >= 4.0 && < 4.15
+                     , aeson >= 1.0 && < 2.0
                      , text >= 1.0 && < 1.3
                      , bytestring >= 0.10 && < 0.11
                      , either >= 5 && < 5.1

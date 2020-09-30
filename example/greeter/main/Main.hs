@@ -1,15 +1,15 @@
 module Main where
 
-import Data.Aeson (FromJSON, ToJSON, eitherDecode, encode)
+import Data.Aeson (FromJSON, ToJSON, encode)
 import qualified Data.ByteString.Lazy.Char8 as BSL
 import qualified Data.Map as Map
-import Data.ProtoLens (defMessage)
+import Data.ProtoLens (defMessage, encodeMessage)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics
 import Lens.Family2
-import Network.Flink.Stateful
 import Network.Flink.Kafka
+import Network.Flink.Stateful
 import Network.Wai.Handler.Warp (run)
 import Network.Wai.Middleware.RequestLogger
 import qualified Proto.Example as EX
@@ -23,11 +23,11 @@ import qualified System.Remote.Monitoring as Monitor
 newtype GreeterState = GreeterState
   { greeterStateCount :: Int
   }
-  deriving (Generic, Show, ToJSON, FromJSON)
+  deriving (Generic, Show)
 
-instance FlinkState GreeterState where
-  decodeState = eitherDecode . BSL.fromStrict
-  encodeState = BSL.toStrict . Data.Aeson.encode
+instance ToJSON GreeterState
+
+instance FromJSON GreeterState
 
 main :: IO ()
 main = do
@@ -42,7 +42,7 @@ counter msg = do
   newCount <- (+ 1) <$> insideCtx greeterStateCount
   let respMsg = "Saw " <> T.unpack name <> " " <> show newCount <> " time(s)"
 
-  sendEgressMsg ("greeting", "greets") (kafkaRecord "greets" name $ response (T.pack respMsg))
+  sendEgressMsg ("greeting", "greets") (kafkaRecord "greets" name $ encodeMessage . response $ T.pack respMsg)
   modifyCtx (\old -> old {greeterStateCount = newCount})
   where
     name = msg ^. EX.name
@@ -54,8 +54,8 @@ counter msg = do
 functionTable :: FunctionTable
 functionTable =
   Map.fromList
-    [ (("greeting", "greeterEntry"), (encodeState (), makeConcrete greeterEntry)),
-      (("greeting", "counter"), (encodeState $ GreeterState 0, makeConcrete counter))
+    [ (("greeting", "greeterEntry"), ("", flinkWrapper . protoInput $ greeterEntry)),
+      (("greeting", "counter"), (BSL.toStrict . encode $ GreeterState 0, flinkWrapper . protoInput . jsonState $ counter))
     ]
 
 wrapWithEkg :: (HasEndpoint a, HasServer a '[]) => Proxy a -> Server a -> IO Application
