@@ -98,7 +98,8 @@ made earlier, then update its state with the new count.
 
 Internally this is batched over many events before sending state back to Flink for efficiency.
 
-NOTE: For JSON (or anything other than protobuf) messages, you must use `sendByteMsg` instead. When communicating with other SDKs, you'll likely want to use `sendMsg` and protobuf.
+NOTE: For JSON (or anything other than protobuf) messages, you must use `sendByteMsg` instead.
+When communicating with other SDKs, you'll likely want to use `sendMsg` and protobuf.
 
 ### Serve HTTP API
 
@@ -106,6 +107,7 @@ NOTE: For JSON (or anything other than protobuf) messages, you must use `sendByt
 import qualified Data.ByteString.Lazy.Char8 as BSL
 import qualified Data.Map as Map
 import Network.Wai.Handler.Warp (run)
+import Network.Wai.Middleware.RequestLogger
 
 main :: IO ()
 main = do
@@ -129,8 +131,8 @@ your function into one that takes arbitrary `ByteString`s so that every function
 `FunctionTable` Map is homogenous. `protoInput` indicates that the input message should be
 deserialized as protobuf. `jsonInput` can be used instead to deserialize the messages as JSON.
 
-`createApp` is used to turn the `FunctionTable` into a `Warp` `Application` and served on
-any port.
+`createApp` is used to turn the `FunctionTable` into a `Warp` `Application` which can be served
+using the `run` function provided by `Warp`.
 
 NOTE: JSON messages may not play nice with other SDKs, you'll probably want to stick with protobuf
 if you're communicating with another SDK without knowing too much Flink Statefun internals.
@@ -162,8 +164,6 @@ module:
             type: printing/printer
           spec:
             endpoint: http://localhost:8000/statefun
-            states:
-              - flink_state
             maxNumBatchRequests: 500
             timeout: 2min
 ```

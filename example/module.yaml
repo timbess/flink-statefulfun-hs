@@ -20,8 +20,6 @@ module:
             type: greeting/greeterEntry
           spec:
             endpoint: http://haskell-worker:8000/statefun
-            states:
-              - flink_state
             maxNumBatchRequests: 500
             timeout: 2min
     ingresses:
