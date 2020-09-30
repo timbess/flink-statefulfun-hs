@@ -95,7 +95,6 @@ class Serde a where
   -- | encodes types to strict 'ByteString's
   serializeBytes :: a -> ByteString
 
--- | Provides functions for Flink state SerDe
 newtype ProtoSerde a = ProtoSerde {getMessage :: a}
   deriving (Functor)
 
