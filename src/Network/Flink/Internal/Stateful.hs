@@ -10,7 +10,7 @@ module Network.Flink.Internal.Stateful
         sendByteMsg,
         sendByteMsgDelay
       ),
-    makeConcrete,
+    flinkWrapper,
     createApp,
     flinkServer,
     flinkApi,
@@ -25,6 +25,9 @@ module Network.Flink.Internal.Stateful
     JsonSerde (..),
     jsonState,
     protoState,
+    serdeInput,
+    protoInput,
+    jsonInput,
   )
 where
 
@@ -40,6 +43,7 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (listToMaybe)
 import Data.ProtoLens (Message, defMessage, encodeMessage)
+import Data.ProtoLens.Any (UnpackError)
 import qualified Data.ProtoLens.Any as Any
 import Data.ProtoLens.Encoding (decodeMessage)
 import Data.ProtoLens.Prism
@@ -267,28 +271,29 @@ data FlinkError
   | ProtodeserializeBytesError String
   | StateDecodeError String
   | MessageDecodeError String
+  | ProtoMessageDecodeError UnpackError
   | NoSuchFunction (Text, Text)
   deriving (Show, Eq)
 
 -- | Convenience function for wrapping state in newtype for JSON serialization
-jsonState :: (Json s, Serde a) => (a -> Function s ()) -> a -> Function (JsonSerde s) ()
+jsonState :: Json s => (a -> Function s ()) -> a -> Function (JsonSerde s) ()
 jsonState f a = jsonWrapper
   where
     jsonWrapper = Function (ExceptT (StateT (\s -> ReaderT (\env -> (fmap . fmap) JsonSerde <$> runner (f a) env (getJson <$> s)))))
     runner res env state = runReaderT (runStateT (runExceptT $ runFunction res) state) env
 
 -- | Convenience function for wrapping state in newtype for Protobuf serialization
-protoState :: (Message s, Serde a) => (a -> Function s ()) -> a -> Function (ProtoSerde s) ()
+protoState :: Message s => (a -> Function s ()) -> a -> Function (ProtoSerde s) ()
 protoState f a = protoWrapper
   where
     protoWrapper = Function (ExceptT (StateT (\s -> ReaderT (\env -> (fmap . fmap) ProtoSerde <$> runner (f a) env (getMessage <$> s)))))
     runner res env state = runReaderT (runStateT (runExceptT $ runFunction res) state) env
 
--- | Takes a function taking an abstract state/message type and converts it to take concrete 'ByteString's
+-- | Takes a function taking an arbitrary state type and converts it to take 'ByteString's.
 -- This allows each function in the 'FunctionTable' to take its own individual type of state and just expose
 -- a function accepting 'ByteString' to the library code.
-makeConcrete :: (Serde s, Serde a) => (a -> Function s ()) -> ByteString -> Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError (FunctionState ByteString))
-makeConcrete func initialContext env invocationBatch = runExceptT $ do
+flinkWrapper :: Serde s => (Any -> Function s ()) -> ByteString -> Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError (FunctionState ByteString))
+flinkWrapper func initialContext env invocationBatch = runExceptT $ do
   deserializeBytesdContext <- liftEither $ mapLeft StateDecodeError $ deserializeBytes initialContext
   (err, finalState) <- liftIO $ runner (newState deserializeBytesdContext)
   liftEither err
@@ -301,7 +306,7 @@ makeConcrete func initialContext env invocationBatch = runExceptT $ do
       case initialCtx of
         Left err -> throwError err
         Right ctx -> setInitialCtx ctx
-      mapM_ (invoke func) ((^. PR.argument) <$> invocationBatch ^. PR.invocations)
+      mapM_ func ((^. PR.argument) <$> invocationBatch ^. PR.invocations)
 
     getInitialCtx def pv = handleEmptyState def $ (^. PR.stateValue) <$> pv
     handleEmptyState def state' = case state' of
@@ -309,8 +314,22 @@ makeConcrete func initialContext env invocationBatch = runExceptT $ do
       Just other -> mapLeft StateDecodeError $ deserializeBytes other
       Nothing -> return def
 
-invoke :: (Serde s, StatefulFunc s m, MonadError FlinkError m, Serde a, MonadReader Env m) => (a -> m b) -> Any -> m b
-invoke f input = f =<< liftEither (mapLeft MessageDecodeError $ deserializeBytes (input ^. Any.value))
+-- | Deserializes input messages as arbitrary bytes by extracting them out of the protobuf Any
+-- and ignoring the type since that's protobuf specific
+serdeInput :: (Serde s, Serde a, StatefulFunc s m, MonadError FlinkError m, MonadReader Env m) => (a -> m b) -> Any -> m b
+serdeInput f input = f =<< liftEither (mapLeft MessageDecodeError $ deserializeBytes (input ^. Any.value))
+
+-- | Deserializes input messages as arbitrary bytes by extracting them out of the protobuf Any
+-- and ignoring the type since that's protobuf specific
+jsonInput :: (Serde s, Json a, StatefulFunc s m, MonadError FlinkError m, MonadReader Env m) => (a -> m b) -> Any -> m b
+jsonInput f = serdeInput wrapJson
+  where
+    wrapJson (JsonSerde msg) = f msg
+
+-- | Deserializes input messages by unpacking the protobuf Any into the expected type.
+-- If you are passing messages via protobuf, this is much more typesafe than 'serdeInput'
+protoInput :: (Serde s, Message a, StatefulFunc s m, MonadError FlinkError m, MonadReader Env m) => (a -> m b) -> Any -> m b
+protoInput f input = f =<< liftEither (mapLeft ProtoMessageDecodeError $ Any.unpack input)
 
 createFlinkResp :: FunctionState ByteString -> FromFunction
 createFlinkResp (FunctionState state mutated invocations delayedInvocations egresses) =
@@ -363,4 +382,5 @@ flinkErrToServant err = case err of
   ProtodeserializeBytesError protoErr -> err400 {errBody = "Could not deserializeBytes protobuf " <> BSL.pack protoErr}
   StateDecodeError decodeErr -> err400 {errBody = "Invalid JSON " <> BSL.pack decodeErr}
   MessageDecodeError msg -> err400 {errBody = "Failed to decode message " <> BSL.pack msg}
+  ProtoMessageDecodeError msg -> err400 {errBody = "Failed to decode message " <> BSL.pack (show msg)}
   NoSuchFunction (namespace, type') -> err400 {errBody = "No such function " <> T.encodeUtf8 (fromStrict namespace) <> T.encodeUtf8 (fromStrict type')}

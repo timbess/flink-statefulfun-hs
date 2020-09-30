@@ -21,7 +21,7 @@ module Network.Flink.Stateful
         sendByteMsg,
         sendByteMsgDelay
       ),
-    makeConcrete,
+    flinkWrapper,
     createApp,
     flinkServer,
     flinkApi,
@@ -31,7 +31,24 @@ module Network.Flink.Stateful
     ProtoSerde (..),
     jsonState,
     protoState,
+    serdeInput,
+    protoInput,
+    jsonInput,
   )
 where
 
 import Network.Flink.Internal.Stateful
+    ( StatefulFunc(..),
+      JsonSerde(..),
+      ProtoSerde(..),
+      Serde(..),
+      FunctionTable,
+      jsonState,
+      protoState,
+      flinkApi,
+      createApp,
+      flinkServer,
+      protoInput,
+      serdeInput,
+      flinkWrapper,
+      jsonInput )
