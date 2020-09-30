@@ -79,6 +79,5 @@ library
                        MultiParamTypeClasses
                        FunctionalDependencies
                        ConstraintKinds
-                       DefaultSignatures
 
   default-language:    Haskell2010
