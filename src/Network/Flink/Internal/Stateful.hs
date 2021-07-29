@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module Network.Flink.Internal.Stateful
   ( StatefulFunc
       ( insideCtx,
@@ -7,14 +8,15 @@ module Network.Flink.Internal.Stateful
         sendMsg,
         sendMsgDelay,
         sendEgressMsg,
-        sendByteMsg,
-        sendByteMsgDelay,
         cancelDelayed
       ),
     flinkWrapper,
     createApp,
     flinkServer,
     flinkApi,
+    Address(.., Address'),
+    ClToken,
+    FuncType (..),
     Function (..),
     Serde (..),
     FunctionState (..),
@@ -28,6 +30,8 @@ module Network.Flink.Internal.Stateful
     JsonSerde (..),
     jsonState,
     protoState,
+    sendProtoMsg,
+    sendProtoMsgDelay
   )
 where
 
@@ -49,10 +53,10 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import Data.Text.Lazy (fromStrict)
-import Data.Coerce
+import Data.Coerce ( coerce )
 import qualified Data.Text.Lazy.Encoding as T
 import Lens.Family2
-import Lens.Micro (traversed, filtered)
+import Lens.Micro ( traversed, filtered )
 import Network.Flink.Internal.ProtoServant (Proto)
 import Proto.RequestReply (FromFunction, ToFunction)
 import qualified Proto.RequestReply as PR
@@ -60,14 +64,20 @@ import qualified Proto.RequestReply_Fields as PR
 import Servant
 
 import Data.Time.Clock (NominalDiffTime)
-import qualified Data.ProtoLens.Any as Any
-import Data.UUID
-import System.Random (randomIO)
+import Data.UUID ( toText, UUID )
+import System.Random ( randomIO )
+
+data FuncType = FuncType Text Text deriving (Eq, Ord)
+data Address = Address FuncType Text
+
+{-# COMPLETE Address' #-}
+pattern Address' :: Text -> Text -> Text -> Address
+pattern Address' fnamespace fnTp fid = Address (FuncType fnamespace fnTp) fid
 
 data FuncRes = IncompleteContext Expiration Text | UpdatedState (FunctionState PR.TypedValue) deriving Show
 type FuncExec = Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError FuncRes)
 --- | Table of stateful functions `(functionNamespace, functionType) -> function
-type FunctionTable = Map (Text, Text) FuncExec
+type FunctionTable = Map FuncType FuncExec
 
 data Env = Env
   { envFunctionNamespace :: Text,
@@ -116,7 +126,7 @@ newtype ProtoSerde a = ProtoSerde {getProto :: a}
   deriving (Functor)
 
 instance Message a => Serde (ProtoSerde a) where
-  tpName px = "proto/" <> messageName (unliftP px)
+  tpName px = "type.googleapis.com/" <> messageName (unliftP px)
     where unliftP :: Proxy (f a) -> Proxy a
           unliftP Proxy = Proxy
   deserializeBytes a = ProtoSerde <$> decodeMessage a
@@ -164,22 +174,6 @@ class MonadIO m => StatefulFunc s m | m -> s where
   getCtx :: m s
   setCtx :: s -> m ()
   modifyCtx :: (s -> s) -> m ()
-  sendMsg ::
-    Message a =>
-    -- | Function address (namespace, type, id)
-    (Text, Text, Text) ->
-    -- | protobuf message to send
-    a ->
-    m ()
-  sendMsgDelay ::
-    Message a =>
-    -- | Function address (namespace, type, id)
-    (Text, Text, Text) ->
-    -- | delay before message send
-    Int ->
-    -- | protobuf message to send
-    a ->
-    m ClToken
   sendEgressMsg ::
     Message a =>
     -- | egress address (namespace, type)
@@ -187,25 +181,29 @@ class MonadIO m => StatefulFunc s m | m -> s where
     -- | protobuf message to send (should be a Kafka or Kinesis protobuf record)
     a ->
     m ()
-
-  sendByteMsg ::
+  sendMsg ::
     Serde a =>
     -- | Function address (namespace, type, id)
-    (Text, Text, Text) ->
+    Address ->
     -- | message to send
     a ->
     m ()
-  sendByteMsgDelay ::
+  sendMsgDelay ::
     Serde a =>
     -- | Function address (namespace, type, id)
-    (Text, Text, Text) ->
+    Address ->
     -- | delay before message send
-    Int ->
+    NominalDiffTime ->
     -- | message to send
     a ->
+    -- | returns cancelation token with which delivery of the message could be canceled
     m ClToken
 
-  cancelDelayed :: (Text, Text, Text) -> ClToken -> m ()
+  cancelDelayed :: 
+    -- | Function address (namespace, type, id)
+    Address -> 
+    -- | cancelation token obtained from delayed call
+    ClToken -> m ()
 
 instance StatefulFunc s (Function s) where
   setInitialCtx ctx = modify (\old -> old {functionStateCtx = ctx})
@@ -214,13 +212,12 @@ instance StatefulFunc s (Function s) where
   getCtx = gets functionStateCtx
   setCtx new = modify (\old -> old {functionStateCtx = new, functionStateMutated = True})
   modifyCtx mutator = getCtx >>= setCtx . mutator
-  sendMsg (namespace, funcType, id') msg = sendByteMsg (namespace, funcType, id') (ProtoSerde msg)
-  sendMsgDelay (namespace, funcType, id') delay msg = sendByteMsgDelay (namespace, funcType, id') delay (ProtoSerde msg)
 
   sendEgressMsg (namespace, egressType) msg = do
     egresses <- gets functionStateEgressMessages
     modify (\old -> old {functionStateEgressMessages = egresses Seq.:|> egressMsg})
     where
+      wmsg = ProtoSerde msg
       egressMsg :: PR.FromFunction'EgressMessage
       egressMsg =
         defMessage
@@ -229,11 +226,11 @@ instance StatefulFunc s (Function s) where
           & PR.argument .~ tpValue
       tpValue =
         defMessage
-          & PR.typename .~ "proto/" <> messageName (pure msg)
+          & PR.typename .~ tpName (pure wmsg)
           & PR.hasValue .~ True          
-          & PR.value .~ encodeMessage (Any.pack msg)
+          & PR.value .~ serializeBytes wmsg
 
-  sendByteMsg (namespace, funcType, id') msg = do
+  sendMsg (Address' namespace funcType id') msg = do
     invocations <- gets functionStateInvocations
     modify (\old -> old {functionStateInvocations = invocations Seq.:|> invocation})
     where
@@ -254,7 +251,7 @@ instance StatefulFunc s (Function s) where
           & PR.hasValue .~ True
           & PR.value .~ serializeBytes msg
 
-  sendByteMsgDelay (namespace, funcType, id') delay msg = do
+  sendMsgDelay (Address' namespace funcType id') delay msg = do
     invocations <- gets functionStateDelayedInvocations
     tk <- ClToken <$> liftIO randomIO
     modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation tk})
@@ -269,7 +266,7 @@ instance StatefulFunc s (Function s) where
       invocation :: ClToken -> PR.FromFunction'DelayedInvocation
       invocation (ClToken tk) =
         defMessage
-          & PR.delayInMs .~ fromIntegral delay
+          & PR.delayInMs .~ round (delay * 1000)
           & PR.target .~ target
           & PR.argument .~ tpValue
           & PR.isCancellationRequest .~ False
@@ -280,7 +277,7 @@ instance StatefulFunc s (Function s) where
           & PR.hasValue .~ True
           & PR.value .~ serializeBytes msg
 
-  cancelDelayed (namespace, funcType, id') (ClToken tk) = do
+  cancelDelayed (Address' namespace funcType id') (ClToken tk) = do
     invocations <- gets functionStateDelayedInvocations
     modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation})
     where
@@ -296,7 +293,15 @@ instance StatefulFunc s (Function s) where
           & PR.target .~ target
           & PR.isCancellationRequest .~ True
           & PR.cancellationToken .~ toText tk
-          
+
+-- | Convinience function to send protobuf messages
+sendProtoMsg :: (StatefulFunc s m, Message a) => Address -> a -> m ()
+sendProtoMsg addr = sendMsg addr . ProtoSerde
+
+-- | Convinience function to send delayed protobuf messages
+sendProtoMsgDelay :: (StatefulFunc s m, Message a) => Address -> NominalDiffTime -> a -> m ClToken
+sendProtoMsgDelay addr delay = sendMsgDelay addr delay . ProtoSerde
+
 data FlinkError
   = MissingInvocationBatch
   | ProtodeserializeBytesError String
@@ -309,12 +314,12 @@ data FlinkError
   deriving (Show, Eq)
 
 -- | Convenience function for wrapping state in newtype for JSON serialization
-jsonState :: Json s => (a -> Function s ()) -> a -> Function (JsonSerde s) ()
-jsonState f = coerce . f
+jsonState :: Json s => Function s () -> Function (JsonSerde s) ()
+jsonState = coerce
 
 -- | Convenience function for wrapping state in newtype for Protobuf serialization
-protoState :: Message s => (a -> Function s ()) -> a -> Function (ProtoSerde s) ()
-protoState f = coerce . f
+protoState :: Message s => Function s () -> Function (ProtoSerde s) ()
+protoState = coerce
 
 -- | Tries to unwrap typed value, possibly throwing FlinkError on broken input
 unwrapA :: forall a m. (Serde a, MonadError FlinkError m) => PR.TypedValue -> m (Maybe a)
@@ -380,7 +385,7 @@ createFlinkResp (IncompleteContext (Expiration mode expireTime) typeName) =
         & PR.typeTypename .~ typeName
         & PR.expirationSpec .~ (
           defMessage 
-            & PR.expireAfterMillis .~ round expireTime * 1000
+            & PR.expireAfterMillis .~ round (expireTime * 1000.0)
             & PR.mode .~ pbmode mode)
       ])
   where pbmode NONE = PR.FromFunction'ExpirationSpec'NONE 
@@ -408,7 +413,7 @@ flinkServer functions toFunction = do
   where
     getBatch input = maybe (throwError $ flinkErrToServant MissingInvocationBatch) return (input ^? PR.maybe'request . _Just . PR._ToFunction'Invocation')
     findFunc addr = do
-      res <- maybe (throwError $ flinkErrToServant $ NoSuchFunction (namespace, type')) return (Map.lookup (namespace, type') functions)
+      res <- maybe (throwError $ flinkErrToServant $ NoSuchFunction (namespace, type')) return (Map.lookup (FuncType namespace type') functions)
       return (res, address)
       where
         address@(namespace, type', _) = (addr ^. PR.namespace, addr ^. PR.type', addr ^. PR.id)

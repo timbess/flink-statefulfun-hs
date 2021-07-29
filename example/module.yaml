@@ -9,7 +9,7 @@ module:
           kind: http
         spec:
           functions: greeting/*
-          urlPathTemplate: http://host.docker.internal:8000/statefun
+          urlPathTemplate: http://haskell-worker:8000/statefun
     ingresses:
       - ingress:
           meta:
@@ -20,7 +20,7 @@ module:
             consumerGroupId: my-group-id
             topics:
               - topic: names
-                valueType: proto/example.GreeterRequest
+                valueType: type.googleapis.com/example.GreeterRequest
                 targets:
                   - greeting/greeterEntry
     egresses:
@@ -31,6 +31,5 @@ module:
           spec:
             address: kafka-broker:9092
             deliverySemantic:
-              type: exactly-once
-              transactionTimeoutMillis: 100000
+              type: at-least-once
 

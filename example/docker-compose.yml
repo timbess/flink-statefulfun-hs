@@ -1,4 +1,5 @@
 version: "2.1"
+
 services:
   zookeeper:
     image: wurstmeister/zookeeper
@@ -18,36 +19,35 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
-  master:
-    build:
-      context: .
+  statefun-manager:
+    image: apache/flink-statefun:3.0.0-java11
     expose:
       - "6123"
     ports:
       - "8081:8081"
     environment:
-      - ROLE=master
-      - MASTER_HOST=master
+      ROLE: master
+      MASTER_HOST: statefun-manager
     volumes:
-      - ./checkpoint-dir:/checkpoint-dir
+      - ./module.yaml:/opt/statefun/modules/greeter/module.yaml
 
-  worker:
-    build:
-      context: .
+  statefun-worker:
+    image: apache/flink-statefun:3.0.0-java11
     expose:
       - "6121"
       - "6122"
     depends_on:
-      - master
+      - statefun-manager
       - kafka-broker
-    environment:
-      - ROLE=worker
-      - MASTER_HOST=master
     links:
-      - "master:master"
+      - "statefun-manager:statefun-manager"
       - "kafka-broker:kafka-broker"
+    environment:
+      ROLE: worker
+      MASTER_HOST: statefun-manager
     volumes:
-      - ./checkpoint-dir:/checkpoint-dir
+      - ./module.yaml:/opt/statefun/modules/greeter/module.yaml
+
 
   haskell-worker:
     command: "./flink-statefulfun-greeter +RTS -N8"
