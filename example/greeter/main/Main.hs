@@ -1,7 +1,6 @@
 module Main where
 
-import Data.Aeson (FromJSON, ToJSON, encode)
-import qualified Data.ByteString.Lazy.Char8 as BSL
+import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Map as Map
 import Data.ProtoLens (defMessage, encodeMessage)
 import Data.Text (Text)
@@ -32,7 +31,7 @@ instance FromJSON GreeterState
 main :: IO ()
 main = do
   putStrLn "http://localhost:8000/"
-  run 8000 =<< (logStdout <$> wrapWithEkg flinkApi (flinkServer functionTable))
+  run 8000 . logStdout =<< wrapWithEkg flinkApi (flinkServer functionTable)
 
 greeterEntry :: StatefulFunc () m => EX.GreeterRequest -> m ()
 greeterEntry msg = sendMsg ("greeting", "counter", msg ^. EX.name) msg
@@ -51,11 +50,12 @@ counter msg = do
       defMessage
         & EX.greeting .~ greeting
 
+
 functionTable :: FunctionTable
 functionTable =
   Map.fromList
-    [ (("greeting", "greeterEntry"), ("", flinkWrapper . protoInput $ greeterEntry)),
-      (("greeting", "counter"), (BSL.toStrict . encode $ GreeterState 0, flinkWrapper . protoInput . jsonState $ counter))
+    [ (("greeting", "greeterEntry"), flinkWrapper (greeterEntry . getMessage) () _),
+      (("greeting", "counter"), flinkWrapper (jsonState $ counter. getMessage) (JsonSerde (GreeterState 0)) _)
     ]
 
 wrapWithEkg :: (HasEndpoint a, HasServer a '[]) => Proxy a -> Server a -> IO Application

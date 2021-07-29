@@ -41,8 +41,7 @@ import Data.Either.Combinators (mapLeft)
 import Data.Foldable (Foldable (toList))
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (listToMaybe)
-import Data.ProtoLens (Message, defMessage, encodeMessage)
+import Data.ProtoLens (Message, defMessage, encodeMessage, messageName)
 import Data.ProtoLens.Any (UnpackError)
 import qualified Data.ProtoLens.Any as Any
 import Data.ProtoLens.Encoding (decodeMessage)
@@ -51,8 +50,10 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import Data.Text.Lazy (fromStrict)
+import Data.Coerce
 import qualified Data.Text.Lazy.Encoding as T
 import Lens.Family2
+import Lens.Micro (traversed, filtered)
 import Network.Flink.Internal.ProtoServant (Proto)
 import Proto.Google.Protobuf.Any (Any)
 import qualified Proto.Google.Protobuf.Any_Fields as Any
@@ -61,8 +62,12 @@ import qualified Proto.RequestReply as PR
 import qualified Proto.RequestReply_Fields as PR
 import Servant
 
---- | Table of stateful functions `(functionNamespace, functionType) -> (initialState, function)
-type FunctionTable = Map (Text, Text) (ByteString, ByteString -> Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError (FunctionState ByteString)))
+import Data.Time.Clock (NominalDiffTime)
+
+data FuncRes = IncompleteContext Expiration | UpdatedState (FunctionState PR.TypedValue)
+type FuncExec = Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError FuncRes)
+--- | Table of stateful functions `(functionNamespace, functionType) -> function
+type FunctionTable = Map (Text, Text) FuncExec
 
 data Env = Env
   { envFunctionNamespace :: Text,
@@ -83,12 +88,22 @@ data FunctionState ctx = FunctionState
 newState :: a -> FunctionState a
 newState initialCtx = FunctionState initialCtx False mempty mempty mempty
 
+data ExpirationMode =  NONE | AFTER_WRITE | AFTER_CALL deriving (Show, Eq)
+
+data Expiration = Expiration {
+  emode :: ExpirationMode,
+  expireAfterMillis :: NominalDiffTime
+} deriving (Show, Eq)
+
 -- | Monad stack used for the execution of a Flink stateful function
 -- Don't reference this directly in your code if possible
 newtype Function s a = Function {runFunction :: ExceptT FlinkError (StateT (FunctionState s) (ReaderT Env IO)) a}
   deriving (Monad, Applicative, Functor, MonadState (FunctionState s), MonadError FlinkError, MonadIO, MonadReader Env)
 
 class Serde a where
+  -- | Type name
+  tpName :: Proxy a -> Text
+
   -- | decodes types from strict 'ByteString's
   deserializeBytes :: ByteString -> Either String a
 
@@ -99,6 +114,9 @@ newtype ProtoSerde a = ProtoSerde {getMessage :: a}
   deriving (Functor)
 
 instance Message a => Serde (ProtoSerde a) where
+  tpName px = messageName (unliftP px)
+    where unliftP :: Proxy (f a) -> Proxy a
+          unliftP Proxy = Proxy
   deserializeBytes a = ProtoSerde <$> decodeMessage a
   serializeBytes (ProtoSerde a) = encodeMessage a
 
@@ -108,18 +126,22 @@ newtype JsonSerde a = JsonSerde {getJson :: a}
   deriving (Functor)
 
 instance Json a => Serde (JsonSerde a) where
+  tpName _ = "json_" -- TODO: add hash or whatever id that can identify a concrete adt
   deserializeBytes a = JsonSerde <$> eitherDecode (BSL.fromStrict a)
   serializeBytes (JsonSerde a) = BSL.toStrict $ encode a
 
 instance Serde () where
+  tpName _ = "Unit"
   deserializeBytes _ = pure ()
   serializeBytes _ = ""
 
 instance Serde ByteString where
+  tpName _ = "Data.ByteString"
   deserializeBytes = pure
   serializeBytes = id
 
 instance Serde BSL.ByteString where
+  tpName _ = "Data.ByteString.Lazy"
   deserializeBytes = pure . BSL.fromStrict
   serializeBytes = BSL.toStrict
 
@@ -187,38 +209,10 @@ instance StatefulFunc s (Function s) where
   insideCtx func = func <$> getCtx
   getCtx = gets functionStateCtx
   setCtx new = modify (\old -> old {functionStateCtx = new, functionStateMutated = True})
-  modifyCtx mutator = mutator <$> getCtx >>= setCtx
-  sendMsg (namespace, funcType, id') msg = do
-    invocations <- gets functionStateInvocations
-    modify (\old -> old {functionStateInvocations = invocations Seq.:|> invocation})
-    where
-      target :: PR.Address
-      target =
-        defMessage
-          & PR.namespace .~ namespace
-          & PR.type' .~ funcType
-          & PR.id .~ id'
-      invocation :: PR.FromFunction'Invocation
-      invocation =
-        defMessage
-          & PR.target .~ target
-          & PR.argument .~ Any.pack msg
-  sendMsgDelay (namespace, funcType, id') delay msg = do
-    invocations <- gets functionStateDelayedInvocations
-    modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation})
-    where
-      target :: PR.Address
-      target =
-        defMessage
-          & PR.namespace .~ namespace
-          & PR.type' .~ funcType
-          & PR.id .~ id'
-      invocation :: PR.FromFunction'DelayedInvocation
-      invocation =
-        defMessage
-          & PR.delayInMs .~ fromIntegral delay
-          & PR.target .~ target
-          & PR.argument .~ Any.pack msg
+  modifyCtx mutator = getCtx >>= setCtx . mutator
+  sendMsg (namespace, funcType, id') msg = sendByteMsg (namespace, funcType, id') (ProtoSerde msg)
+  sendMsgDelay (namespace, funcType, id') delay msg = sendByteMsgDelay (namespace, funcType, id') delay (ProtoSerde msg)
+
   sendEgressMsg (namespace, egressType) msg = do
     egresses <- gets functionStateEgressMessages
     modify (\old -> old {functionStateEgressMessages = egresses Seq.:|> egressMsg})
@@ -228,13 +222,17 @@ instance StatefulFunc s (Function s) where
         defMessage
           & PR.egressNamespace .~ namespace
           & PR.egressType .~ egressType
-          & PR.argument .~ Any.pack msg
+          & PR.argument .~ tpValue
+      tpValue =
+        defMessage
+          & PR.typename .~ messageName (pure msg)
+          & PR.hasValue .~ True          
+          & PR.value .~ encodeMessage msg
+
   sendByteMsg (namespace, funcType, id') msg = do
     invocations <- gets functionStateInvocations
     modify (\old -> old {functionStateInvocations = invocations Seq.:|> invocation})
     where
-      argument :: Any
-      argument = defMessage & Any.value .~ serializeBytes msg
       target :: PR.Address
       target =
         defMessage
@@ -245,13 +243,17 @@ instance StatefulFunc s (Function s) where
       invocation =
         defMessage
           & PR.target .~ target
-          & PR.argument .~ argument
+          & PR.argument .~ tpValue
+      tpValue =
+        defMessage
+          & PR.typename .~ tpName (pure msg)
+          & PR.hasValue .~ True
+          & PR.value .~ serializeBytes msg
+
   sendByteMsgDelay (namespace, funcType, id') delay msg = do
     invocations <- gets functionStateDelayedInvocations
     modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation})
     where
-      argument :: Any
-      argument = defMessage & Any.value .~ serializeBytes msg
       target :: PR.Address
       target =
         defMessage
@@ -263,11 +265,18 @@ instance StatefulFunc s (Function s) where
         defMessage
           & PR.delayInMs .~ fromIntegral delay
           & PR.target .~ target
-          & PR.argument .~ argument
+          & PR.argument .~ tpValue
+      tpValue =
+        defMessage
+          & PR.typename .~ tpName (pure msg)
+          & PR.hasValue .~ True
+          & PR.value .~ serializeBytes msg
 
 data FlinkError
   = MissingInvocationBatch
   | ProtodeserializeBytesError String
+  | InvalidTypePassedError Text Text
+  | EmptyArgumentPassed
   | StateDecodeError String
   | MessageDecodeError String
   | ProtoMessageDecodeError UnpackError
@@ -276,62 +285,52 @@ data FlinkError
 
 -- | Convenience function for wrapping state in newtype for JSON serialization
 jsonState :: Json s => (a -> Function s ()) -> a -> Function (JsonSerde s) ()
-jsonState f a = jsonWrapper
-  where
-    jsonWrapper = Function (ExceptT (StateT (\s -> ReaderT (\env -> (fmap . fmap) JsonSerde <$> runner (f a) env (getJson <$> s)))))
-    runner res env state = runReaderT (runStateT (runExceptT $ runFunction res) state) env
+jsonState f = coerce . f
 
 -- | Convenience function for wrapping state in newtype for Protobuf serialization
 protoState :: Message s => (a -> Function s ()) -> a -> Function (ProtoSerde s) ()
-protoState f a = protoWrapper
-  where
-    protoWrapper = Function (ExceptT (StateT (\s -> ReaderT (\env -> (fmap . fmap) ProtoSerde <$> runner (f a) env (getMessage <$> s)))))
-    runner res env state = runReaderT (runStateT (runExceptT $ runFunction res) state) env
+protoState f = coerce . f
+
+-- | Tries to unwrap typed value, possibly throwing FlinkError on broken input
+unwrapA :: forall a m. (Serde a, MonadError FlinkError m) => PR.TypedValue -> m (Maybe a)
+unwrapA arg = let
+      atp = arg ^. PR.typename
+      ctp = tpName @a Proxy
+      in if not (arg^. PR.hasValue) then pure Nothing else
+           if atp /= ctp
+              then throwError (InvalidTypePassedError ctp atp)
+              else Just <$> (liftEither . mapLeft MessageDecodeError $ deserializeBytes @a (arg ^. PR.value))
 
 -- | Takes a function taking an arbitrary state type and converts it to take 'ByteString's.
 -- This allows each function in the 'FunctionTable' to take its own individual type of state and just expose
 -- a function accepting 'ByteString' to the library code.
-flinkWrapper :: Serde s => (Any -> Function s ()) -> ByteString -> Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError (FunctionState ByteString))
-flinkWrapper func initialContext env invocationBatch = runExceptT $ do
-  deserializeBytesdContext <- liftEither $ mapLeft StateDecodeError $ deserializeBytes initialContext
-  (err, finalState) <- liftIO $ runner (newState deserializeBytesdContext)
-  liftEither err
-  return $ serializeBytes <$> finalState
+flinkWrapper :: forall a s. (Serde a, Serde s) => s -> Expiration -> (a -> Function s ()) -> FuncExec
+flinkWrapper func s0 expr env invocationBatch = runExceptT $ do
+  (eiRes, _) <- liftIO $ runner (newState s0)
+  liftEither eiRes
   where
-    runner state = runReaderT (runStateT (runExceptT $ runFunction runWithCtx) state) env
+    passedArgs = invocationBatch ^.. PR.invocations . traversed . PR.argument
+    mbInitCtx = (PR.state . traversed . filtered ((== "flink_state") . (^. PR.stateName)) . PR.stateValue) 
+      `firstOf` invocationBatch
     runWithCtx = do
-      defaultCtx <- gets functionStateCtx
-      let initialCtx = getInitialCtx defaultCtx (listToMaybe $ invocationBatch ^. PR.state)
-      case initialCtx of
-        Left err -> throwError err
-        Right ctx -> setInitialCtx ctx
-      mapM_ func ((^. PR.argument) <$> invocationBatch ^. PR.invocations)
+      case mbInitCtx of 
+        Nothing -> return $ IncompleteContext expr -- if state was not propagated to the function - shorcut to incomplete context reponse
+        Just tv -> do 
+          mbCtx <- unwrapA @s tv
+          case mbCtx of
+            Nothing -> pure () -- if null state value was propagated
+            Just s1 -> setInitialCtx s1
+          mbArgs <- traverse (unwrapA @a) passedArgs
+          args <- traverse (maybe (throwError EmptyArgumentPassed) pure) mbArgs
+          mapM_ func args
+          gets (UpdatedState . fmap outS)
+    runner state = runReaderT (runStateT (runExceptT $ runFunction runWithCtx) state) env
+    outS fstate = defMessage
+        & PR.typename .~ tpName (pure fstate)
+        & PR.value .~ serializeBytes fstate
 
-    getInitialCtx def pv = handleEmptyState def $ (^. PR.stateValue) <$> pv
-    handleEmptyState def state' = case state' of
-      Just "" -> return def
-      Just other -> mapLeft StateDecodeError $ deserializeBytes other
-      Nothing -> return def
-
--- | Deserializes input messages as arbitrary bytes by extracting them out of the protobuf Any
--- and ignoring the type since that's protobuf specific
-serdeInput :: (Serde s, Serde a, StatefulFunc s m, MonadError FlinkError m, MonadReader Env m) => (a -> m b) -> Any -> m b
-serdeInput f input = f =<< liftEither (mapLeft MessageDecodeError $ deserializeBytes (input ^. Any.value))
-
--- | Deserializes input messages as arbitrary bytes by extracting them out of the protobuf Any
--- and ignoring the type since that's protobuf specific
-jsonInput :: (Serde s, Json a, StatefulFunc s m, MonadError FlinkError m, MonadReader Env m) => (a -> m b) -> Any -> m b
-jsonInput f = serdeInput wrapJson
-  where
-    wrapJson (JsonSerde msg) = f msg
-
--- | Deserializes input messages by unpacking the protobuf Any into the expected type.
--- If you are passing messages via protobuf, this is much more typesafe than 'serdeInput'
-protoInput :: (Serde s, Message a, StatefulFunc s m, MonadError FlinkError m, MonadReader Env m) => (a -> m b) -> Any -> m b
-protoInput f input = f =<< liftEither (mapLeft ProtoMessageDecodeError $ Any.unpack input)
-
-createFlinkResp :: FunctionState ByteString -> FromFunction
-createFlinkResp (FunctionState state mutated invocations delayedInvocations egresses) =
+createFlinkResp :: FuncRes -> FromFunction
+createFlinkResp (UpdatedState (FunctionState state mutated invocations delayedInvocations egresses)) =
   defMessage & PR.invocationResult
     .~ ( defMessage
            & PR.stateMutations .~ toList stateMutations
@@ -348,6 +347,20 @@ createFlinkResp (FunctionState state mutated invocations delayedInvocations egre
           & PR.stateValue .~ state
         | mutated
       ]
+createFlinkResp (IncompleteContext (Expiration mode expireTime)) = 
+  defMessage & PR.incompleteInvocationContext .~ ( 
+    defMessage & PR.missingValues .~ [
+      defMessage
+        & PR.stateName .~ "flink_state"
+        & PR.typeTypename .~ "whatever"
+        & PR.expirationSpec .~ (
+          defMessage 
+            & PR.expireAfterMillis .~ round expireTime
+            & PR.mode .~ pbmode mode)
+      ])
+  where pbmode NONE = PR.FromFunction'ExpirationSpec'NONE 
+        pbmode AFTER_CALL = PR.FromFunction'ExpirationSpec'AFTER_INVOKE  
+        pbmode AFTER_WRITE = PR.FromFunction'ExpirationSpec'AFTER_WRITE  
 
 type FlinkApi =
   "statefun" :> ReqBody '[Proto] ToFunction :> Post '[Proto] FromFunction
@@ -363,8 +376,8 @@ createApp funcs = serve flinkApi (flinkServer funcs)
 flinkServer :: FunctionTable -> Server FlinkApi
 flinkServer functions toFunction = do
   batch <- getBatch toFunction
-  ((initialCtx, function), (namespace, type', id')) <- findFunc (batch ^. PR.target)
-  result <- liftIO $ function initialCtx (Env namespace type' id') batch
+  (function, (namespace, type', id')) <- findFunc (batch ^. PR.target)
+  result <- liftIO $ function (Env namespace type' id') batch
   finalState <- liftEither $ mapLeft flinkErrToServant result
   return $ createFlinkResp finalState
   where
@@ -383,3 +396,5 @@ flinkErrToServant err = case err of
   MessageDecodeError msg -> err400 {errBody = "Failed to decode message " <> BSL.pack msg}
   ProtoMessageDecodeError msg -> err400 {errBody = "Failed to decode message " <> BSL.pack (show msg)}
   NoSuchFunction (namespace, type') -> err400 {errBody = "No such function " <> T.encodeUtf8 (fromStrict namespace) <> T.encodeUtf8 (fromStrict type')}
+  InvalidTypePassedError expected passed -> err400 {errBody = "Expected type " <> T.encodeUtf8 (fromStrict expected) <> ", got " <>  T.encodeUtf8 (fromStrict passed)}
+  EmptyArgumentPassed -> err400 {errBody = "Empty argument was passed to the function" }
