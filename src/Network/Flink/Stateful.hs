@@ -29,11 +29,10 @@ module Network.Flink.Stateful
     FunctionTable,
     JsonSerde (..),
     ProtoSerde (..),
+    Expiration(..),
+    ExpirationMode(..),
     jsonState,
     protoState,
-    serdeInput,
-    protoInput,
-    jsonInput,
   )
 where
 
@@ -43,12 +42,12 @@ import Network.Flink.Internal.Stateful
       ProtoSerde(..),
       Serde(..),
       FunctionTable,
+      Expiration(..),
+      ExpirationMode(..),
       jsonState,
       protoState,
       flinkApi,
       createApp,
       flinkServer,
-      protoInput,
-      serdeInput,
       flinkWrapper,
-      jsonInput )
+ )

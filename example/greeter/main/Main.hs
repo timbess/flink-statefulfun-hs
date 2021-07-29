@@ -54,8 +54,8 @@ counter msg = do
 functionTable :: FunctionTable
 functionTable =
   Map.fromList
-    [ (("greeting", "greeterEntry"), flinkWrapper (greeterEntry . getMessage) () _),
-      (("greeting", "counter"), flinkWrapper (jsonState $ counter. getMessage) (JsonSerde (GreeterState 0)) _)
+    [ (("greeting", "greeterEntry"), flinkWrapper () (Expiration NONE 0) (greeterEntry . getProto) ),
+      (("greeting", "counter"), flinkWrapper (JsonSerde (GreeterState 0)) (Expiration NONE 0) (jsonState $ counter . getProto))
     ]
 
 wrapWithEkg :: (HasEndpoint a, HasServer a '[]) => Proxy a -> Server a -> IO Application

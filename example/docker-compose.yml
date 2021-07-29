@@ -50,11 +50,11 @@ services:
       - ./checkpoint-dir:/checkpoint-dir
 
   haskell-worker:
-    # command: "./flink-statefulfun-greeter +RTS -N8"
+    command: "./flink-statefulfun-greeter +RTS -N8"
     # Uncomment to build locally
-    # build:
-    #   context: ..
-    #   dockerfile: example/greeter/Dockerfile
+    build:
+      context: ..
+      dockerfile: example/greeter/Dockerfile
     image: tdbgamer/flink-statefulfun-hs-greeter
     expose:
       - "8000"

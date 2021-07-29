@@ -8,7 +8,8 @@ module Network.Flink.Internal.Stateful
         sendMsgDelay,
         sendEgressMsg,
         sendByteMsg,
-        sendByteMsgDelay
+        sendByteMsgDelay,
+        cancelDelayed
       ),
     flinkWrapper,
     createApp,
@@ -20,14 +21,13 @@ module Network.Flink.Internal.Stateful
     FlinkError (..),
     FunctionTable,
     Env (..),
+    Expiration(..),
+    ExpirationMode(..),
     newState,
     ProtoSerde (..),
     JsonSerde (..),
     jsonState,
     protoState,
-    serdeInput,
-    protoInput,
-    jsonInput,
   )
 where
 
@@ -43,7 +43,6 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.ProtoLens (Message, defMessage, encodeMessage, messageName)
 import Data.ProtoLens.Any (UnpackError)
-import qualified Data.ProtoLens.Any as Any
 import Data.ProtoLens.Encoding (decodeMessage)
 import Data.ProtoLens.Prism
 import Data.Sequence (Seq)
@@ -55,16 +54,17 @@ import qualified Data.Text.Lazy.Encoding as T
 import Lens.Family2
 import Lens.Micro (traversed, filtered)
 import Network.Flink.Internal.ProtoServant (Proto)
-import Proto.Google.Protobuf.Any (Any)
-import qualified Proto.Google.Protobuf.Any_Fields as Any
 import Proto.RequestReply (FromFunction, ToFunction)
 import qualified Proto.RequestReply as PR
 import qualified Proto.RequestReply_Fields as PR
 import Servant
 
 import Data.Time.Clock (NominalDiffTime)
+import qualified Data.ProtoLens.Any as Any
+import Data.UUID
+import System.Random (randomIO)
 
-data FuncRes = IncompleteContext Expiration | UpdatedState (FunctionState PR.TypedValue)
+data FuncRes = IncompleteContext Expiration Text | UpdatedState (FunctionState PR.TypedValue) deriving Show
 type FuncExec = Env -> PR.ToFunction'InvocationBatchRequest -> IO (Either FlinkError FuncRes)
 --- | Table of stateful functions `(functionNamespace, functionType) -> function
 type FunctionTable = Map (Text, Text) FuncExec
@@ -75,6 +75,8 @@ data Env = Env
     envFunctionId :: Text
   }
   deriving (Show)
+
+newtype ClToken = ClToken UUID
 
 data FunctionState ctx = FunctionState
   { functionStateCtx :: ctx,
@@ -110,11 +112,11 @@ class Serde a where
   -- | encodes types to strict 'ByteString's
   serializeBytes :: a -> ByteString
 
-newtype ProtoSerde a = ProtoSerde {getMessage :: a}
+newtype ProtoSerde a = ProtoSerde {getProto :: a}
   deriving (Functor)
 
 instance Message a => Serde (ProtoSerde a) where
-  tpName px = messageName (unliftP px)
+  tpName px = "proto/" <> messageName (unliftP px)
     where unliftP :: Proxy (f a) -> Proxy a
           unliftP Proxy = Proxy
   deserializeBytes a = ProtoSerde <$> decodeMessage a
@@ -126,22 +128,22 @@ newtype JsonSerde a = JsonSerde {getJson :: a}
   deriving (Functor)
 
 instance Json a => Serde (JsonSerde a) where
-  tpName _ = "json_" -- TODO: add hash or whatever id that can identify a concrete adt
+  tpName _ = "json/json" -- TODO: add adt name
   deserializeBytes a = JsonSerde <$> eitherDecode (BSL.fromStrict a)
   serializeBytes (JsonSerde a) = BSL.toStrict $ encode a
 
 instance Serde () where
-  tpName _ = "Unit"
+  tpName _ = "ghc/Unit"
   deserializeBytes _ = pure ()
   serializeBytes _ = ""
 
 instance Serde ByteString where
-  tpName _ = "Data.ByteString"
+  tpName _ = "ghc/Data.ByteString"
   deserializeBytes = pure
   serializeBytes = id
 
 instance Serde BSL.ByteString where
-  tpName _ = "Data.ByteString.Lazy"
+  tpName _ = "ghc/Data.ByteString.Lazy"
   deserializeBytes = pure . BSL.fromStrict
   serializeBytes = BSL.toStrict
 
@@ -177,7 +179,7 @@ class MonadIO m => StatefulFunc s m | m -> s where
     Int ->
     -- | protobuf message to send
     a ->
-    m ()
+    m ClToken
   sendEgressMsg ::
     Message a =>
     -- | egress address (namespace, type)
@@ -201,7 +203,9 @@ class MonadIO m => StatefulFunc s m | m -> s where
     Int ->
     -- | message to send
     a ->
-    m ()
+    m ClToken
+
+  cancelDelayed :: (Text, Text, Text) -> ClToken -> m ()
 
 instance StatefulFunc s (Function s) where
   setInitialCtx ctx = modify (\old -> old {functionStateCtx = ctx})
@@ -225,9 +229,9 @@ instance StatefulFunc s (Function s) where
           & PR.argument .~ tpValue
       tpValue =
         defMessage
-          & PR.typename .~ messageName (pure msg)
+          & PR.typename .~ "proto/" <> messageName (pure msg)
           & PR.hasValue .~ True          
-          & PR.value .~ encodeMessage msg
+          & PR.value .~ encodeMessage (Any.pack msg)
 
   sendByteMsg (namespace, funcType, id') msg = do
     invocations <- gets functionStateInvocations
@@ -252,6 +256,32 @@ instance StatefulFunc s (Function s) where
 
   sendByteMsgDelay (namespace, funcType, id') delay msg = do
     invocations <- gets functionStateDelayedInvocations
+    tk <- ClToken <$> liftIO randomIO
+    modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation tk})
+    return tk
+    where
+      target :: PR.Address
+      target =
+        defMessage
+          & PR.namespace .~ namespace
+          & PR.type' .~ funcType
+          & PR.id .~ id'
+      invocation :: ClToken -> PR.FromFunction'DelayedInvocation
+      invocation (ClToken tk) =
+        defMessage
+          & PR.delayInMs .~ fromIntegral delay
+          & PR.target .~ target
+          & PR.argument .~ tpValue
+          & PR.isCancellationRequest .~ False
+          & PR.cancellationToken .~ toText tk
+      tpValue =
+        defMessage
+          & PR.typename .~ tpName (pure msg)
+          & PR.hasValue .~ True
+          & PR.value .~ serializeBytes msg
+
+  cancelDelayed (namespace, funcType, id') (ClToken tk) = do
+    invocations <- gets functionStateDelayedInvocations
     modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation})
     where
       target :: PR.Address
@@ -263,15 +293,10 @@ instance StatefulFunc s (Function s) where
       invocation :: PR.FromFunction'DelayedInvocation
       invocation =
         defMessage
-          & PR.delayInMs .~ fromIntegral delay
           & PR.target .~ target
-          & PR.argument .~ tpValue
-      tpValue =
-        defMessage
-          & PR.typename .~ tpName (pure msg)
-          & PR.hasValue .~ True
-          & PR.value .~ serializeBytes msg
-
+          & PR.isCancellationRequest .~ True
+          & PR.cancellationToken .~ toText tk
+          
 data FlinkError
   = MissingInvocationBatch
   | ProtodeserializeBytesError String
@@ -305,7 +330,7 @@ unwrapA arg = let
 -- This allows each function in the 'FunctionTable' to take its own individual type of state and just expose
 -- a function accepting 'ByteString' to the library code.
 flinkWrapper :: forall a s. (Serde a, Serde s) => s -> Expiration -> (a -> Function s ()) -> FuncExec
-flinkWrapper func s0 expr env invocationBatch = runExceptT $ do
+flinkWrapper s0 expr func env invocationBatch = runExceptT $ do
   (eiRes, _) <- liftIO $ runner (newState s0)
   liftEither eiRes
   where
@@ -314,7 +339,7 @@ flinkWrapper func s0 expr env invocationBatch = runExceptT $ do
       `firstOf` invocationBatch
     runWithCtx = do
       case mbInitCtx of 
-        Nothing -> return $ IncompleteContext expr -- if state was not propagated to the function - shorcut to incomplete context reponse
+        Nothing -> return $ IncompleteContext expr (tpName @s Proxy) -- if state was not propagated to the function - shorcut to incomplete context reponse
         Just tv -> do 
           mbCtx <- unwrapA @s tv
           case mbCtx of
@@ -347,15 +372,15 @@ createFlinkResp (UpdatedState (FunctionState state mutated invocations delayedIn
           & PR.stateValue .~ state
         | mutated
       ]
-createFlinkResp (IncompleteContext (Expiration mode expireTime)) = 
+createFlinkResp (IncompleteContext (Expiration mode expireTime) typeName) = 
   defMessage & PR.incompleteInvocationContext .~ ( 
     defMessage & PR.missingValues .~ [
       defMessage
         & PR.stateName .~ "flink_state"
-        & PR.typeTypename .~ "whatever"
+        & PR.typeTypename .~ typeName
         & PR.expirationSpec .~ (
           defMessage 
-            & PR.expireAfterMillis .~ round expireTime
+            & PR.expireAfterMillis .~ round expireTime * 1000
             & PR.mode .~ pbmode mode)
       ])
   where pbmode NONE = PR.FromFunction'ExpirationSpec'NONE 

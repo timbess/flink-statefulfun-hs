@@ -20,6 +20,7 @@ import signal
 import sys
 import time
 import threading
+import time
 
 import random
 
@@ -52,6 +53,7 @@ def produce():
         key = request.name.encode('utf-8')
         val = request.SerializeToString()
         print("Publishing {} {}".format(key, val), flush=True)
+        time.sleep(1)
         producer.send(topic='names', key=key, value=val)
         producer.flush()
         # time.sleep(delay_seconds)

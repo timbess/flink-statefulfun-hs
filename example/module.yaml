@@ -1,44 +1,32 @@
-version: "1.0"
+version: "3.0"
 module:
   meta:
     type: remote
   spec:
-    functions:
-      - function:
-          meta:
-            kind: http
-            type: greeting/counter
-          spec:
-            endpoint: http://haskell-worker:8000/statefun
-            states:
-              - flink_state
-            maxNumBatchRequests: 500
-            timeout: 2min
-      - function:
-          meta:
-            kind: http
-            type: greeting/greeterEntry
-          spec:
-            endpoint: http://haskell-worker:8000/statefun
-            maxNumBatchRequests: 500
-            timeout: 2min
+    endpoints:
+    - endpoint:
+        meta: 
+          kind: http
+        spec:
+          functions: greeting/*
+          urlPathTemplate: http://host.docker.internal:8000/statefun
     ingresses:
       - ingress:
           meta:
-            type: statefun.kafka.io/routable-protobuf-ingress
+            type: io.statefun.kafka/ingress
             id: greeting/names
           spec:
             address: kafka-broker:9092
             consumerGroupId: my-group-id
             topics:
               - topic: names
-                typeUrl: com.googleapis/example.GreeterRequest
+                valueType: proto/example.GreeterRequest
                 targets:
                   - greeting/greeterEntry
     egresses:
       - egress:
           meta:
-            type: statefun.kafka.io/generic-egress
+            type: io.statefun.kafka/egress
             id: greeting/greets
           spec:
             address: kafka-broker:9092

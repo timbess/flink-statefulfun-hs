@@ -14,9 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM ververica/flink-statefun:2.2.1
+FROM apache/flink-statefun:3.0.0
 
-RUN mkdir -p /opt/statefun/modules/greeter
-ADD module.yaml /opt/statefun/modules/greeter
+
+RUN mkdir -p /opt/statefun/modules/remote
+COPY module.yaml /opt/statefun/modules/remote/module.yaml
 
 
