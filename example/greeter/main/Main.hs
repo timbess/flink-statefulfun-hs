@@ -1,7 +1,6 @@
 module Main where
 
-import Data.Aeson (FromJSON, ToJSON, encode)
-import qualified Data.ByteString.Lazy.Char8 as BSL
+import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Map as Map
 import Data.ProtoLens (defMessage, encodeMessage)
 import Data.Text (Text)
@@ -32,10 +31,10 @@ instance FromJSON GreeterState
 main :: IO ()
 main = do
   putStrLn "http://localhost:8000/"
-  run 8000 =<< (logStdout <$> wrapWithEkg flinkApi (flinkServer functionTable))
+  run 8000 . logStdout =<< wrapWithEkg flinkApi (flinkServer functionTable)
 
 greeterEntry :: StatefulFunc () m => EX.GreeterRequest -> m ()
-greeterEntry msg = sendMsg ("greeting", "counter", msg ^. EX.name) msg
+greeterEntry msg = sendProtoMsg (Address' "greeting" "counter" $ msg ^. EX.name) msg
 
 counter :: StatefulFunc GreeterState m => EX.GreeterRequest -> m ()
 counter msg = do
@@ -51,11 +50,12 @@ counter msg = do
       defMessage
         & EX.greeting .~ greeting
 
+
 functionTable :: FunctionTable
 functionTable =
   Map.fromList
-    [ (("greeting", "greeterEntry"), ("", flinkWrapper . protoInput $ greeterEntry)),
-      (("greeting", "counter"), (BSL.toStrict . encode $ GreeterState 0, flinkWrapper . protoInput . jsonState $ counter))
+    [ ((FuncType "greeting" "greeterEntry"), flinkWrapper () (Expiration NONE 0) (greeterEntry . getProto) ),
+      ((FuncType  "greeting" "counter"), flinkWrapper (JsonSerde (GreeterState 0)) (Expiration AFTER_CALL 5) (jsonState . counter . getProto))
     ]
 
 wrapWithEkg :: (HasEndpoint a, HasServer a '[]) => Proxy a -> Server a -> IO Application

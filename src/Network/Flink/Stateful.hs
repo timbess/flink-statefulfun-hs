@@ -17,23 +17,24 @@ module Network.Flink.Stateful
         modifyCtx,
         sendMsg,
         sendMsgDelay,
-        sendEgressMsg,
-        sendByteMsg,
-        sendByteMsgDelay
+        sendEgressMsg
       ),
     flinkWrapper,
     createApp,
     flinkServer,
     flinkApi,
+    Address(..),
+    FuncType (..),
     Serde (..),
     FunctionTable,
     JsonSerde (..),
     ProtoSerde (..),
+    Expiration(..),
+    ExpirationMode(..),
     jsonState,
     protoState,
-    serdeInput,
-    protoInput,
-    jsonInput,
+    sendProtoMsg,
+    sendProtoMsgDelay
   )
 where
 
@@ -43,12 +44,16 @@ import Network.Flink.Internal.Stateful
       ProtoSerde(..),
       Serde(..),
       FunctionTable,
+      Expiration(..),
+      ExpirationMode(..),
+      Address(..),
+      FuncType (..),
       jsonState,
       protoState,
       flinkApi,
       createApp,
       flinkServer,
-      protoInput,
-      serdeInput,
       flinkWrapper,
-      jsonInput )
+      sendProtoMsg,
+      sendProtoMsgDelay
+ )

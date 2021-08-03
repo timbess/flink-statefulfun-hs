@@ -16,14 +16,15 @@
  * limitations under the License.
  */
 
-syntax = "proto3";
+ syntax = "proto3";
 
-package org.apache.flink.statefun.flink.io;
-option java_package = "org.apache.flink.statefun.flink.io.generated";
-option java_multiple_files = true;
-
-message KafkaProducerRecord {
-    string key = 1;
-    bytes value_bytes = 2;
-    string topic = 3;
-}
+ package io.statefun.sdk.egress;
+ 
+ option java_package = "org.apache.flink.statefun.sdk.egress.generated";
+ option java_multiple_files = true;
+ 
+ message KafkaProducerRecord {
+     string key = 1;
+     bytes value_bytes = 2;
+     string topic = 3;
+ }
