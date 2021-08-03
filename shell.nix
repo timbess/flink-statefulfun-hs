@@ -2,8 +2,8 @@
 , nixpkgs ? import <nixpkgs> {}
 , staticNix ? nixpkgs.fetchgit {
   url = "https://github.com/nh2/static-haskell-nix";
-  sha256 = "0y97fvkjhvx17rmfdlymn4hwnq4r9nhf2r4m1s9fkh8gb8hfxp1s";
-  rev = "dbce18f4808d27f6a51ce31585078b49c86bd2b5";
+  sha256 = "0c104fqw6gyxbli8d59bkm9bm79svxf6q2zk5yx771kwfh6n4ij7";
+  rev = "0e72ef1ba53a4db633862cae231fb90a1e052a02";
 }
 # { nixpkgs ? import <nixpkgs> {}
 , haskellNixSrc ? builtins.fetchTarball https://github.com/input-output-hk/haskell.nix/archive/master.tar.gz
@@ -15,7 +15,7 @@ let
 in
   pkgs.mkShell {
     buildInputs = (with pkgs; [
-      muslpkgs.haskell.compiler.ghc882
+      muslpkgs.haskell.compiler.ghc884
       muslpkgs.zlib.static
       (muslpkgs.gmp6.override { withStatic = true; })
       gcc
