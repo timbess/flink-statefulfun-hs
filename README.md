@@ -82,7 +82,7 @@ counter msg = do
   newCount <- (+ 1) <$> insideCtx greeterStateCount
   let respMsg = "Saw " <> T.unpack name <> " " <> show newCount <> " time(s)"
 
-  sendMsg ("printing", "printer") (response $ T.pack respMsg)
+  sendMsgProto ("printing", "printer") (response $ T.pack respMsg)
   modifyCtx (\old -> old {greeterStateCount = newCount})
   where
     name = msg ^. EX.name
@@ -115,17 +115,15 @@ main = do
   putStrLn "http://localhost:8000/"
   run 8000 (logStdout $ createApp functionTable)
 
-greeterState = BSL.toStrict . encode $ GreeterState 0
-
 functionTable :: FunctionTable
 functionTable =
   Map.fromList
-    [ (("printing", "printer"), ("", flinkWrapper . protoInput $ printer)),
-      (("greeting", "counter"), (greeterState, flinkWrapper . protoInput . jsonState $ counter))
+    [ ((FuncType "greeting" "greeterEntry"), flinkWrapper () (Expiration NONE 0) (greeterEntry . getProto)),
+      ((FuncType  "greeting" "counter"), flinkWrapper (JsonSerde (GreeterState 0)) (Expiration AFTER_CALL 5) (jsonState . counter . getProto))
     ]
 ```
 
-The `FunctionTable` is a Map of `(namespace, functionType)` to `(initialState, wrappedFunction)`.
+The `FunctionTable` is a Map of `(namespace, functionType)` to `wrappedFunction`.
 `jsonState` is a helper to serialize your function state as `JSON` for storage in the flink
 backend. `protoState` can also be used if that is your preference. `flinkWrapper` transforms
 your function into one that takes arbitrary `ByteString`s so that every function in the
@@ -143,30 +141,18 @@ if you're communicating with another SDK without knowing too much Flink Statefun
 To use the functions that are now served from the API, we now need to declare it in the `module.yaml`.
 
 ```yaml
-version: "1.0"
+version: "3.0"
 module:
   meta:
     type: remote
   spec:
-    functions:
-      - function:
-          meta:
-            kind: http
-            type: greeting/counter
-          spec:
-            endpoint: http://localhost:8000/statefun
-            states:
-              - flink_state
-            maxNumBatchRequests: 500
-            timeout: 2min
-      - function:
-          meta:
-            kind: http
-            type: printing/printer
-          spec:
-            endpoint: http://localhost:8000/statefun
-            maxNumBatchRequests: 500
-            timeout: 2min
+    endpoints:
+      - endpoint:
+        meta: 
+          kind: http
+        spec:
+          functions: greeting/*
+          urlPathTemplate: http://localhost:8000/statefun
 ```
 
 Flink Statefun supports multiple states, but for simplicity the SDK just serializes the whole
