@@ -17,7 +17,8 @@ module Network.Flink.Stateful
         modifyCtx,
         sendMsg,
         sendMsgDelay,
-        sendEgressMsg
+        sendEgressMsg,
+        cancelDelayed
       ),
     flinkWrapper,
     createApp,
@@ -48,7 +49,7 @@ import Network.Flink.Internal.Stateful
       Expiration(..),
       ExpirationMode(..),
       Address(..),
-      ClToken,
+      ClToken(..),
       FuncType (..),
       jsonState,
       protoState,

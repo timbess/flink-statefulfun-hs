@@ -15,7 +15,7 @@ module Network.Flink.Internal.Stateful
     flinkServer,
     flinkApi,
     Address(.., Address'),
-    ClToken,
+    ClToken(..),
     FuncType (..),
     Function (..),
     Serde (..),
@@ -63,9 +63,11 @@ import qualified Proto.RequestReply as PR
 import qualified Proto.RequestReply_Fields as PR
 import Servant
 
-import Data.Time.Clock (NominalDiffTime)
+import Data.Time.Clock ( NominalDiffTime )
 import Data.UUID ( toText, UUID )
 import System.Random ( randomIO )
+import GHC.Generics ( Generic )
+import Data.Typeable ( Typeable )
 
 data FuncType = FuncType Text Text deriving (Eq, Ord)
 data Address = Address FuncType Text
@@ -86,7 +88,11 @@ data Env = Env
   }
   deriving (Show)
 
-newtype ClToken = ClToken UUID
+-- | Cancellation token used to cancel delayed messages
+newtype ClToken = ClToken UUID deriving (Eq, Show, Generic, Typeable)
+
+instance ToJSON ClToken
+instance FromJSON ClToken
 
 data FunctionState ctx = FunctionState
   { functionStateCtx :: ctx,
@@ -200,10 +206,9 @@ class MonadIO m => StatefulFunc s m | m -> s where
     m ClToken
 
   cancelDelayed :: 
-    -- | Function address (namespace, type, id)
-    Address -> 
     -- | cancelation token obtained from delayed call
-    ClToken -> m ()
+    ClToken -> 
+    m ()
 
 instance StatefulFunc s (Function s) where
   setInitialCtx ctx = modify (\old -> old {functionStateCtx = ctx})
@@ -277,20 +282,13 @@ instance StatefulFunc s (Function s) where
           & PR.hasValue .~ True
           & PR.value .~ serializeBytes msg
 
-  cancelDelayed (Address' namespace funcType id') (ClToken tk) = do
+  cancelDelayed (ClToken tk) = do
     invocations <- gets functionStateDelayedInvocations
     modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation})
     where
-      target :: PR.Address
-      target =
-        defMessage
-          & PR.namespace .~ namespace
-          & PR.type' .~ funcType
-          & PR.id .~ id'
       invocation :: PR.FromFunction'DelayedInvocation
       invocation =
         defMessage
-          & PR.target .~ target
           & PR.isCancellationRequest .~ True
           & PR.cancellationToken .~ toText tk
 
