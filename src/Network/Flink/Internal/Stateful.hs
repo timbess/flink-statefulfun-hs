@@ -7,15 +7,13 @@ module Network.Flink.Internal.Stateful
         modifyCtx,
         sendMsg,
         sendMsgDelay,
-        sendEgressMsg,
-        cancelDelayed
+        sendEgressMsg
       ),
     flinkWrapper,
     createApp,
     flinkServer,
     flinkApi,
     Address(.., Address'),
-    ClToken(..),
     FuncType (..),
     Function (..),
     Serde (..),
@@ -64,10 +62,6 @@ import qualified Proto.RequestReply_Fields as PR
 import Servant
 
 import Data.Time.Clock ( NominalDiffTime )
-import Data.UUID ( toText, UUID )
-import System.Random ( randomIO )
-import GHC.Generics ( Generic )
-import Data.Typeable ( Typeable )
 
 data FuncType = FuncType Text Text deriving (Eq, Ord)
 data Address = Address FuncType Text
@@ -87,12 +81,6 @@ data Env = Env
     envFunctionId :: Text
   }
   deriving (Show)
-
--- | Cancellation token used to cancel delayed messages
-newtype ClToken = ClToken UUID deriving (Eq, Show, Generic, Typeable)
-
-instance ToJSON ClToken
-instance FromJSON ClToken
 
 data FunctionState ctx = FunctionState
   { functionStateCtx :: ctx,
@@ -203,11 +191,6 @@ class MonadIO m => StatefulFunc s m | m -> s where
     -- | message to send
     a ->
     -- | returns cancelation token with which delivery of the message could be canceled
-    m ClToken
-
-  cancelDelayed :: 
-    -- | cancelation token obtained from delayed call
-    ClToken -> 
     m ()
 
 instance StatefulFunc s (Function s) where
@@ -258,9 +241,7 @@ instance StatefulFunc s (Function s) where
 
   sendMsgDelay (Address' namespace funcType id') delay msg = do
     invocations <- gets functionStateDelayedInvocations
-    tk <- ClToken <$> liftIO randomIO
-    modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation tk})
-    return tk
+    modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation})
     where
       target :: PR.Address
       target =
@@ -268,36 +249,24 @@ instance StatefulFunc s (Function s) where
           & PR.namespace .~ namespace
           & PR.type' .~ funcType
           & PR.id .~ id'
-      invocation :: ClToken -> PR.FromFunction'DelayedInvocation
-      invocation (ClToken tk) =
+      invocation :: PR.FromFunction'DelayedInvocation
+      invocation =
         defMessage
           & PR.delayInMs .~ round (delay * 1000)
           & PR.target .~ target
           & PR.argument .~ tpValue
-          & PR.isCancellationRequest .~ False
-          & PR.cancellationToken .~ toText tk
       tpValue =
         defMessage
           & PR.typename .~ tpName (pure msg)
           & PR.hasValue .~ True
           & PR.value .~ serializeBytes msg
 
-  cancelDelayed (ClToken tk) = do
-    invocations <- gets functionStateDelayedInvocations
-    modify (\old -> old {functionStateDelayedInvocations = invocations Seq.:|> invocation})
-    where
-      invocation :: PR.FromFunction'DelayedInvocation
-      invocation =
-        defMessage
-          & PR.isCancellationRequest .~ True
-          & PR.cancellationToken .~ toText tk
-
 -- | Convinience function to send protobuf messages
 sendProtoMsg :: (StatefulFunc s m, Message a) => Address -> a -> m ()
 sendProtoMsg addr = sendMsg addr . ProtoSerde
 
 -- | Convinience function to send delayed protobuf messages
-sendProtoMsgDelay :: (StatefulFunc s m, Message a) => Address -> NominalDiffTime -> a -> m ClToken
+sendProtoMsgDelay :: (StatefulFunc s m, Message a) => Address -> NominalDiffTime -> a -> m ()
 sendProtoMsgDelay addr delay = sendMsgDelay addr delay . ProtoSerde
 
 data FlinkError
